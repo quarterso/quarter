@@ -6,6 +6,7 @@ margin after AI cost only; hosting, support and other cost of revenue are not he
 """
 
 import csv
+import re
 import urllib.parse
 from datetime import timedelta
 from decimal import Decimal
@@ -24,6 +25,7 @@ STRIPE_URL = "https://api.stripe.com"
 STRIPE_KEY_ENV = "STRIPE_REVENUE_KEY"
 STRIPE_LOOKBACK = timedelta(days=120)  # an invoice paid this month may have been created months before
 STRIPE_MAX_PAGES = 500
+CUSTOMER_ID = re.compile(r"cus_[A-Za-z0-9]{1,64}")
 
 
 def read_revenue(text: str) -> dict[str, int]:
@@ -59,17 +61,28 @@ def stripe_customer(invoice: dict) -> str:
     """The name Quarter books a Stripe customer under: the customer's `quarter_customer`
     metadata when set (so it can match the customer your agents send), else the name on
     the invoice, else the Stripe customer id."""
-    customer = invoice.get("customer")
+    return _named(invoice.get("customer"), invoice.get("customer_name"))
+
+
+def stripe_customer_named(key: str, customer_id: str, base: str = STRIPE_URL) -> str:
+    """The same name for a customer that paid no invoice this month, read from the customer."""
+    if not CUSTOMER_ID.fullmatch(customer_id):
+        raise ValueError(f"{customer_id!r} is not a Stripe customer id")
+    customer = _get(f"{base}/v1/customers/{customer_id}", {"Authorization": f"Bearer {key}"}, key)
+    return _named(customer, customer.get("name"))
+
+
+def _named(customer: dict | str | None, name: str | None) -> str:
     meta = (customer.get("metadata") or {}) if isinstance(customer, dict) else {}
     cid = customer.get("id") if isinstance(customer, dict) else customer
-    return (meta.get("quarter_customer") or invoice.get("customer_name") or cid or "").strip()
+    return (meta.get("quarter_customer") or name or cid or "").strip()
 
 
 def stripe_revenue(key: str, month: str, base: str = STRIPE_URL) -> tuple[dict[str, int], dict]:
     """Revenue by customer for the month from Stripe, read-only: invoices paid that month
     (cash basis), excluding tax, less credit notes issued after payment. USD only; other
-    currencies are counted and left out. Needs a restricted key that can read invoices and
-    customers, nothing else."""
+    currencies are counted and left out. notes["ids"] maps each Stripe customer id to its
+    name. Needs a restricted key that can read invoices and customers, nothing else."""
     if not key.startswith("rk_"):
         raise ValueError("use a restricted key (rk_...) with read access to invoices and customers;"
                          " Quarter never needs a full secret key")
@@ -79,7 +92,7 @@ def stripe_revenue(key: str, month: str, base: str = STRIPE_URL) -> tuple[dict[s
               ("created[lt]", str(int(end.timestamp())))]
     headers = {"Authorization": f"Bearer {key}"}
     out: dict[str, int] = {}
-    notes = {"invoices": 0, "skipped_currency": 0, "test_mode": False}
+    notes = {"invoices": 0, "skipped_currency": 0, "test_mode": False, "ids": {}}
     after = None
     for _ in range(STRIPE_MAX_PAGES):
         query = urllib.parse.urlencode(params + ([("starting_after", after)] if after else []))
@@ -94,6 +107,8 @@ def stripe_revenue(key: str, month: str, base: str = STRIPE_URL) -> tuple[dict[s
             cents = (inv.get("total_excluding_tax") or 0) - (inv.get("post_payment_credit_notes_amount") or 0)
             who = stripe_customer(inv)
             out[who] = out.get(who, 0) + cents * 10_000
+            customer = inv.get("customer")
+            notes["ids"][customer.get("id") if isinstance(customer, dict) else customer] = who
             notes["invoices"] += 1
             notes["test_mode"] |= inv.get("livemode") is False
         if not page.get("has_more") or not page.get("data"):

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://stripe.com/stripe-app.schema.json",
+  "id": "com.quarterfi.margin",
+  "name": "Quarter AI Margin",
+  "version": "0.1.0",
+  "icon": "icon.png",
+  "permissions": [
+    {
+      "permission": "secret_write",
+      "purpose": "Keeps your Quarter address and read-only Quarter key in Stripe's Secret Store."
+    }
+  ],
+  "ui_extension": {
+    "views": [
+      {"viewport": "stripe.dashboard.customer.detail", "component": "CustomerMargin"},
+      {"viewport": "settings", "component": "AppSettings"}
+    ],
+    "content_security_policy": {
+      "connect-src": ["https://*.quarterfi.com/margin"],
+      "purpose": "Reads each customer's AI cost and margin from your hosted Quarter gateway."
+    }
+  },
+  "distribution_type": "public",
+  "sandbox_install_compatible": true
+}

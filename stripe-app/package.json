@@ -1,0 +1,28 @@
+{
+  "name": "com.quarterfi.margin",
+  "version": "0.1.0",
+  "description": "AI cost and margin per customer, from Quarter, on the Stripe customer page",
+  "private": true,
+  "license": "SEE LICENSE IN ../LICENSE.md",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "start": "stripe apps start",
+    "upload": "stripe apps upload"
+  },
+  "dependencies": {
+    "@stripe/ui-extension-sdk": "9.4.0",
+    "stripe": "^17.7.0"
+  },
+  "devDependencies": {
+    "@stripe/ui-extension-tools": "0.1.0",
+    "@types/jest": "29.5.14",
+    "@types/react": "18.3.31",
+    "jest": "29.7.0",
+    "ts-jest": "29.4.12",
+    "typescript": "6.0.3"
+  }
+}

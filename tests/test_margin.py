@@ -83,6 +83,8 @@ class FakeStripe(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlsplit(self.path)
         FakeStripe.requests.append((url.path, parse_qs(url.query), self.headers.get("Authorization")))
+        if url.path == "/v1/customers/cus_9":  # paid nothing this month
+            return self._send({"id": "cus_9", "object": "customer", "name": "Initech", "metadata": {}})
         oct5, sep30 = 1791158400, 1790726400  # 2026-10-05 and 2026-09-30, UTC
         acme = {"id": "cus_1", "metadata": {"quarter_customer": "acme"}}
         first = [
@@ -100,7 +102,10 @@ class FakeStripe(BaseHTTPRequestHandler):
              "status_transitions": {"paid_at": oct5}},
         ]
         page = second if "starting_after" in parse_qs(url.query) else first
-        body = json.dumps({"object": "list", "has_more": page is first, "data": page}).encode()
+        self._send({"object": "list", "has_more": page is first, "data": page})
+
+    def _send(self, answer):
+        body = json.dumps(answer).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -121,7 +126,7 @@ def stripe_url():
 def test_stripe_revenue_reads_paid_invoices_of_the_month(stripe_url):
     revenue, notes = stripe_revenue("rk_test_x", "2026-10", stripe_url)
     assert revenue == {"acme": to_micros(105)}  # 120 - 20 credit note + 5; September and EUR left out
-    assert notes == {"invoices": 2, "skipped_currency": 1, "test_mode": True}
+    assert notes == {"invoices": 2, "skipped_currency": 1, "test_mode": True, "ids": {"cus_1": "acme"}}
     path, query, auth = FakeStripe.requests[0]
     assert path == "/v1/invoices" and query["status"] == ["paid"] and auth == "Bearer rk_test_x"
     assert FakeStripe.requests[1][1]["starting_after"] == ["in_2"]

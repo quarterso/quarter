@@ -92,7 +92,7 @@ from .export import FORMATS, centre_headers, focus, focus_rows, journal, read_ce
 from .failopen import FailOpenLog
 from .feed import payee_flags
 from .insights import forecast
-from .margin import margins, stripe_revenue
+from .margin import CUSTOMER_ID, STRIPE_KEY_ENV, margins, stripe_customer_named, stripe_revenue
 from .money import MAX_AMOUNT, to_micros, usd_display
 from .outcomes import KIND_MAX
 from .payments import AUTH_TTL, RAILS, authorisation, payee_rule, x402_settlement
@@ -134,7 +134,7 @@ HOP_BY_HOP = {
 RESERVED = {  # first path segments the gateway answers itself, never a vendor's
     "dashboard", "approvals", "healthz", "costs", "audit",
     "forecast", "agents", "authorize", "settle", "slack", "tasks", "export", "audit-pack", "attribution",
-    "standing", "bills", "issuing", "openapi.json", "outcomes", "config", "exceptions",
+    "standing", "bills", "issuing", "openapi.json", "outcomes", "config", "exceptions", "margin",
 }
 # Vendor endpoints that cost nothing: forwarded without a price, a hold or a charge.
 FREE_POSTS = ("v1/messages/count_tokens", "v1/responses/input_tokens")
@@ -320,6 +320,26 @@ class Gateway:
                 got = f"Stripe {e}"
             self._revenue[month] = (now, got)
         return got if isinstance(got, str) else margins(self.ledger, month, got[0]) | {"stripe": got[1]}
+
+    def customer_margin(self, month: str, customer_id: str) -> dict | str:
+        """One Stripe customer's margin row, named as the revenue reader names it."""
+        m = self.margin(month)
+        if isinstance(m, str):
+            return m
+        name = m["stripe"]["ids"].get(customer_id)
+        if name is None:
+            try:
+                name = stripe_customer_named(self.stripe_revenue_key, customer_id)
+            except ValueError as e:
+                return f"Stripe {e}"
+        row = next((r for r in m["rows"] if r["customer"] == name),
+                   {"customer": name, "revenue": 0, "ai_cost": 0, "margin": 0, "margin_pct": None})
+        test_mode = self.stripe_revenue_key.startswith("rk_test_")  # the key's mode, even with no invoices
+        return {"month": month, "stripe_customer": customer_id, **row, "test_mode": test_mode}
+
+    def read_only(self, name: str) -> bool:
+        """A person whose key may only read: for keys kept where others can see them."""
+        return bool(self.people.get(name, {}).get("read_only"))
 
     def in_shadow(self) -> list[str]:
         """Each rule that records instead of refusing, in words, for startup and the dashboard."""
@@ -687,8 +707,10 @@ class Gateway:
         if clash:
             raise ValueError(f"vendor names reserved for the gateway: {sorted(clash)}")
         for name, p in self.people.items():
-            if not isinstance(p, dict) or not p.get("key") or p.get("role") not in ROLES:
-                raise ValueError(f"person {name} needs a key and a role: {', '.join(ROLES)}")
+            if (not isinstance(p, dict) or not p.get("key") or p.get("role") not in ROLES
+                    or type(p.get("read_only", False)) is not bool):
+                raise ValueError(f"person {name} needs a key and a role ({', '.join(ROLES)}),"
+                                 " and read_only, if set, is true or false")
         keys = [p["key"] for p in self.people.values()] + [self.admin_key] * bool(self.admin_key)
         if len(set(keys)) != len(keys) or set(keys) & self.agent_keys:
             raise ValueError("each person needs a key of their own, apart from the agent keys")
@@ -839,12 +861,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"ok": True})
         if route == "/openapi.json":  # no secrets in it, so no key
             return self._relay(200, "application/json", OPENAPI.read_bytes())
+        if route == "/margin":  # the Stripe App reads it from a sandboxed frame whose origin is null;
+            # safe for any origin, as the key travels in a header no browser adds by itself
+            self._extra["access-control-allow-origin"] = "*"
         if gw.locked_out(self._client()):
             return self._json(429, {"error": "too many wrong keys, try again later"})
         if route == "/dashboard":
             return self._dashboard()
         if route in FINANCE_DOWNLOADS:
             return self._download(route)
+        if route == "/margin":
+            return self._margin()
         receipt = route.startswith("/approvals/") and route.endswith("/receipt") and route.count("/") == 3
         why = route.startswith("/tasks/") and route.endswith("/why") and route.count("/") == 3
         if not (receipt or why or route in VIEWER_ROUTES):
@@ -962,10 +989,10 @@ class Handler(BaseHTTPRequestHandler):
         month = self._month()
         if month is None:
             return
-        can_decide = ROLES.index(role) >= ROLES.index("approver")
+        can_decide = ROLES.index(role) >= ROLES.index("approver") and not self.gw.read_only(name)
         finance = ROLES.index(role) >= ROLES.index("finance")
         centres, version = None, ""
-        if finance and self.gw.centres_path:
+        if finance and self.gw.centres_path and not self.gw.read_only(name):
             try:
                 centres, version = self.gw.centres()
             except ValueError:  # a hand-edited file read_centres refuses: no form over it
@@ -1085,7 +1112,14 @@ class Handler(BaseHTTPRequestHandler):
         if self._cross_site():
             self._json(403, {"error": "cross-site request refused"})
             return False
-        return not self._refused(role)
+        if self._refused(role):
+            return False
+        name = self._person()[0]
+        if self.gw.read_only(name):
+            self.gw.ledger.audit("role_refused", self._actor(), f"read-only {self.command} {urlsplit(self.path).path}")
+            self._json(403, {"error": f"{name} has a read-only key"})
+            return False
+        return True
 
     def _done(self, ok: bool, raw: bytes, why: str = ""):
         """The dashboard's buttons go back to the dashboard; an API call gets JSON, saying
@@ -1194,6 +1228,34 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"id": cost_id})
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, ArithmeticError) as e:
             return self._json(400, {"error": f"bad request: {e}"})
+
+    def _margin(self):
+        """Margin after AI cost for ?month=, or one Stripe customer's with &customer=cus_...
+        CORS is set in do_GET, so refusals are readable too."""
+        if self._refused("finance"):
+            return None
+        if not self.gw.stripe_revenue_key:
+            return self._json(503, {"error": f"revenue is not set up: serve with {STRIPE_KEY_ENV}"})
+        month = self._month()
+        if month is None:
+            return None
+        customer = parse_qs(urlsplit(self.path).query).get("customer", [""])[0]
+        if customer and not CUSTOMER_ID.fullmatch(customer):
+            return self._json(400, {"error": "customer is a Stripe customer id, cus_..."})
+        got = self.gw.customer_margin(month, customer) if customer else self.gw.margin(month)
+        if isinstance(got, str):
+            return self._json(502, {"error": got})
+        return self._json(200, got)
+
+    def do_OPTIONS(self):
+        """The CORS preflight for /margin, the one route read from another origin."""
+        if urlsplit(self.path).path != "/margin":
+            return self.send_error(501, "Unsupported method ('OPTIONS')")
+        self.send_response(204)
+        for k, v in {"access-control-allow-origin": "*", "access-control-allow-methods": "GET",
+                     "access-control-allow-headers": "x-quarter-key", "access-control-max-age": "600"}.items():
+            self.send_header(k, v)
+        self.end_headers()
 
     def _sign_config(self):
         """The signed-in person signs off the caps and rules now in force."""

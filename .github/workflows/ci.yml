@@ -31,3 +31,9 @@ jobs:
         working-directory: x402
       - run: node --test
         working-directory: examples/cloudflare-seller
+      - run: npm ci
+        working-directory: stripe-app
+      - run: npm test
+        working-directory: stripe-app
+      - run: npm run typecheck
+        working-directory: stripe-app

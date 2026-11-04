@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Quarter",
-    "version": "0.1.11",
+    "version": "0.1.12",
     "summary": "The gateway and ledger that decide and record what AI agents spend.",
     "description": "Quarter's own HTTP API, as served by `quarter-ledger serve` (proxy.py).\n\nAgents call vendors through `/{vendor}/{path}` and ask before paying on any rail with `POST /authorize`, then report with `POST /settle`. People read reports and decide approvals with their own key and role (viewer, approver, finance, admin; each may do all that the ones before it may). Amounts in responses are micro-dollars unless a field says `_usd`.\n\nErrors are JSON error objects carrying a message; their exact shape is not part of this description. Every response may carry the x-quarter-* headers listed under components.headers where they apply.\n\nOn every route: a body sent with `transfer-encoding` instead of `content-length` is answered 411; a bad length 400; a body over 8 MiB 413; a body over 64 KiB from a caller with no valid key 401. Ten wrong person keys from one address in five minutes lock it out (429) for the rest of that window.\n\nUnder a Quarter route's first segment, a method the route does not answer gets 405 with an `Allow` header (components/responses/E405), and a path that is no route gets 404; neither reaches a vendor.",
     "license": {
@@ -1972,6 +1972,177 @@
           },
           "403": {
             "description": "A named key reported for another agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/margin": {
+      "get": {
+        "tags": [
+          "Finance"
+        ],
+        "summary": "Margin after AI cost, by customer",
+        "description": "Finance role or above; a read-only key is enough. Revenue is read from Stripe with the gateway's `STRIPE_REVENUE_KEY` (invoices paid that month, tax excluded, post-payment credit notes off, USD only), at most every 10 minutes. With `customer`, one Stripe customer's row, named as the revenue is named: `quarter_customer` metadata, else name, else id. Answers any origin (`Access-Control-Allow-Origin: *`, and an OPTIONS preflight allowing `x-quarter-key`), for the Stripe App.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "finance",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/month"
+          },
+          {
+            "name": "customer",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^cus_[A-Za-z0-9]{1,64}$"
+            },
+            "description": "A Stripe customer id."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The month's margins (`rows`, totals, `stripe` notes with `ids` mapping customer ids to names), or with `customer` one row.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "month": {
+                          "type": "string"
+                        },
+                        "rows": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "customer": {
+                                "type": "string"
+                              },
+                              "revenue": {
+                                "type": "integer",
+                                "description": "Micro-dollars."
+                              },
+                              "ai_cost": {
+                                "type": "integer",
+                                "description": "Micro-dollars."
+                              },
+                              "margin": {
+                                "type": "integer",
+                                "description": "Micro-dollars."
+                              },
+                              "margin_pct": {
+                                "type": [
+                                  "number",
+                                  "null"
+                                ],
+                                "description": "Null without revenue."
+                              }
+                            }
+                          }
+                        },
+                        "stripe": {
+                          "type": "object"
+                        }
+                      }
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "customer": {
+                              "type": "string"
+                            },
+                            "revenue": {
+                              "type": "integer",
+                              "description": "Micro-dollars."
+                            },
+                            "ai_cost": {
+                              "type": "integer",
+                              "description": "Micro-dollars."
+                            },
+                            "margin": {
+                              "type": "integer",
+                              "description": "Micro-dollars."
+                            },
+                            "margin_pct": {
+                              "type": [
+                                "number",
+                                "null"
+                              ],
+                              "description": "Null without revenue."
+                            }
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "month": {
+                              "type": "string"
+                            },
+                            "stripe_customer": {
+                              "type": "string"
+                            },
+                            "test_mode": {
+                              "type": "boolean"
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A bad month or customer id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "502": {
+            "description": "Stripe could not be read; the error says why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No Stripe revenue key is set.",
             "content": {
               "application/json": {
                 "schema": {
