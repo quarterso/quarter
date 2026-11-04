@@ -1578,6 +1578,9 @@ class Handler(BaseHTTPRequestHandler):
         vendor, _, rest = url.path.lstrip("/").partition("/")
         self._vendor = vendor  # so a refusal, even of an unknown vendor, is in a vendor's shape
         if not self._agent_ok():
+            if any(self._vendor_auth().values()) or self.headers.get("x-quarter-key"):
+                return self._json(401, {"error": "that key is not an agent key of this gateway: use the agent"
+                                        " key its admin gave you (it starts qa_) as the API key, or in x-quarter-key"})
             return self._json(401, {"error": "a Quarter agent key is required: send it as the API key, or in x-quarter-key"})
         plain = unquote(rest)  # a vendor decodes %2e%2e before resolving it
         if any(seg in ("..", ".") for seg in plain.split("/")) or "\\" in plain:

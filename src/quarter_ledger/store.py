@@ -11,6 +11,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -228,7 +229,14 @@ class Ledger:
         self.register: agent_register.RegisterRule | None = None  # QUARTER_REGISTER: see hold
         self.free_decisions: int | None = None  # QUARTER_FREE_DECISIONS: see _count_decision
         self._free_noted: str | None = None  # the month whose free_limit row is known written
-        self.db.execute("pragma journal_mode=wal")
+        for attempt in range(100):  # switching to WAL skips the busy timeout, so a process opening at once can see "locked"
+            try:
+                self.db.execute("pragma journal_mode=wal")
+                break
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e) or attempt == 99:
+                    raise
+                time.sleep(0.05)
         self.db.executescript(SCHEMA)
         with self._write():  # locked, so two processes opening at once cannot race
             for table, column, kind in (

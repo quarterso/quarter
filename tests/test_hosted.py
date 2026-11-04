@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from test_proxy import ADMIN_KEY, AGENT_KEY, start
 
+from quarter_ledger import mock_upstream as mock
 from quarter_ledger.pricing import PriceBook, with_built_in
 from quarter_ledger.proxy import Gateway, serve
 from quarter_ledger.store import Ledger
@@ -24,7 +25,7 @@ def load(name):
     return module
 
 
-render, mock = load("render"), load("mock_upstream")
+render = load("render")
 TUNNEL = "6f1c2b8e-0d3a-4c5b-9e7f-1a2b3c4d5e6f"
 
 
@@ -36,8 +37,8 @@ def test_example_renders_every_file(tmp_path):
     loaded = render.load((KIT / "tenants.example.json").read_text())
     written = render.render(loaded, tmp_path)
     recipient = ["backup-recipient.txt"] if (KIT / "backup-recipient.txt").exists() else []
-    assert written == sorted(["Caddyfile", "nightly_backup.py", "cloudflared.yml", "compose.yaml",
-                              "litestream.yml", "mock_upstream.py", *recipient])
+    assert written == sorted(["caddy/Caddyfile", "nightly_backup.py", "cloudflared.yml", "compose.yaml",
+                              "litestream.yml", *recipient])
     compose = (tmp_path / "compose.yaml").read_text()
     assert "env_file: env/acme.env" in compose and "mem_limit: 96m" in compose
     assert 'QUARTER_MAX_WAIT: "110"' in compose and "enable_ipv6: true" in compose
@@ -74,7 +75,7 @@ def test_the_sandbox_is_not_backed_up_and_reaches_only_its_mock():
     loaded = render.load(box({"name": "sandbox", "tag": "v1", "sandbox": True}, {"name": "acme", "tag": "v1"}))
     backups = render.litestream(loaded)
     assert "/data/acme/ledger.db" in backups and "sandbox" not in backups
-    assert backups.count("sync-interval: 10s") == 1
+    assert backups.count("monitor-interval: 1m") == 1 and "l0-retention-check-interval: 5m" in backups
     compose = render.compose(loaded)
     upstreams = json.loads(json.loads(compose.split("QUARTER_UPSTREAMS: ")[1].split("\n")[0]))
     assert upstreams == {"openai": "http://127.0.0.1:8790", "anthropic": "http://127.0.0.1:8790"}
@@ -263,3 +264,19 @@ def test_free_plan_counts_decisions_and_paid_does_not():
     assert "QUARTER_FREE_DECISIONS" not in beta
     with pytest.raises(ValueError, match="plan must be"):
         render.load(box({"name": "acme", "tag": "t", "plan": "gold"}))
+
+
+def test_the_litestream_check_fails_when_litestream_is_not_running(monkeypatch, tmp_path):
+    import subprocess
+    nightly_backup = load("nightly_backup")
+    out = {"ps": "demo\ncaddy\n", "logs": "level=INFO msg=ok\n"}
+
+    def run(cmd, **_):
+        return subprocess.CompletedProcess(cmd, 0, out["ps" if "ps" in cmd else "logs"], "")
+
+    monkeypatch.setattr(nightly_backup.subprocess, "run", run)
+    assert not nightly_backup.litestream_ok(tmp_path)
+    out["ps"] += "litestream\n"
+    assert nightly_backup.litestream_ok(tmp_path)
+    out["logs"] += "level=ERROR msg=403\n"
+    assert not nightly_backup.litestream_ok(tmp_path)

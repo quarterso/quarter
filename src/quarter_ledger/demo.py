@@ -1,13 +1,12 @@
 """quarter-ledger demo: the whole loop on this machine, with no vendor key and no money.
 
-In a throwaway folder it starts the mock vendor (deploy/hosted/mock_upstream.py) and the
+In a throwaway folder it starts the mock vendor (mock_upstream.py) and the
 gateway on free localhost ports. It sends calls as two agents for two customers, has one
 call held for a person and approves it by name, books a sample LiteLLM export through
 connect mode, then says where the dashboard is and how to see the journal and audit pack.
 It runs from a checkout of this repository, which holds the mock and the sample.
 """
 
-import importlib.util
 import json
 import os
 import secrets
@@ -24,11 +23,10 @@ from datetime import UTC, datetime
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+from . import mock_upstream
 from .proxy import VENDOR_KEY_ENV
 
-REPO = Path(__file__).resolve().parents[2]
-MOCK = REPO / "deploy" / "hosted" / "mock_upstream.py"
-SAMPLE = REPO / "examples" / "litellm-sample.csv"
+SAMPLE = Path(__file__).with_name("samples") / "litellm-sample.csv"
 SAMPLE_MONTH = "2026-10"
 CLI = (sys.executable, "-c", "from quarter_ledger.cli import main; main()")
 LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # localhost only, never a proxy
@@ -54,10 +52,7 @@ def free_port() -> int:
 
 
 def start_mock() -> ThreadingHTTPServer:
-    spec = importlib.util.spec_from_file_location("mock_upstream", MOCK)
-    mock = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mock)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), mock.Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), mock_upstream.Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -138,8 +133,6 @@ def quarter_ledger(folder: Path, env: dict, *argv: str) -> None:
 
 
 def run(args) -> None:
-    if not MOCK.exists() or not SAMPLE.exists():
-        sys.exit("demo: run it from a checkout of the ledger repository (it needs deploy/ and examples/)")
     folder = Path(args.dir).resolve() if args.dir else Path(tempfile.mkdtemp(prefix="quarter-demo-"))
     folder.mkdir(parents=True, exist_ok=True)
     if (folder / "ledger.db").exists():
@@ -170,7 +163,7 @@ def run(args) -> None:
                          "globex", "deep-report", max_tokens=32000, approval=held["approval_id"])
         print(f"  retried with x-quarter-approval: {status}")
 
-        print(f"\nConnect mode books last month's LiteLLM bill ({SAMPLE.relative_to(REPO)}):")
+        print("\nConnect mode books last month's LiteLLM bill (a sample file):")
         print("  ", end="", flush=True)
         quarter_ledger(folder, env, "connect", "litellm", "--file", str(SAMPLE), "--no-alerts")
 
@@ -184,7 +177,7 @@ Dashboard: {gateway}/dashboard?month={month}
 
 See the rest, in another terminal:
   cd {folder}
-  alias q='uv run --project {REPO} --env-file .env quarter-ledger'
+  alias q='uv run --no-project --env-file .env {sys.executable} -m quarter_ledger'
   q report --by customer
   q agents list
   q export --month {SAMPLE_MONTH}

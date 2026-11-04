@@ -5,22 +5,41 @@ Spending caps, human approvals and a tamper-evident ledger for what AI agents sp
 ## Install
 
 - From source: `git clone https://github.com/quarterso/quarter && cd quarter && uv sync`
-- From PyPI: `uv tool install quarter-ledger` or `pipx install quarter-ledger` (the `quarter-ledger` command; the demo below needs the source)
-- As a container: run `quarter-ledger init` once for a `.env` with fresh keys, then `docker run -p 8780:8780 --env-file .env -v quarter:/data ghcr.io/quarterso/quarter`. Without agent keys the gateway refuses to listen beyond localhost.
+- From PyPI: `uv tool install quarter-ledger` or `pipx install quarter-ledger` (the `quarter-ledger` command; `quarter-ledger demo` works from it too)
+- As a container: run `quarter-ledger init` once for a `.env` and `caps.json` with fresh keys, then, in that folder, `docker run -p 8780:8780 --env-file .env -v "$PWD/caps.json:/app/caps.json:ro" -v quarter:/data ghcr.io/quarterso/quarter`. Without agent keys the gateway refuses to listen beyond localhost.
 
 ## Try it in two minutes
 
 ```bash
-uv sync
-uv run quarter-ledger demo
+uvx quarter-ledger demo            # from PyPI, nothing else to install
+uv sync && uv run quarter-ledger demo  # or in a checkout
 ```
 
 It runs on this machine only, with made-up keys and a mock vendor, so it costs nothing. It starts the gateway, sends calls as two agents for two customers, holds one large call until a named person approves it, and books a sample LiteLLM bill through connect mode. Then it prints the dashboard address with its sign-in, and the commands for the journal and the audit pack. Press Ctrl+C to stop it. `--dir <folder>` keeps it in a folder you choose.
+
+## Try the hosted sandbox, nothing to install
+
+`https://sandbox.quarterfi.com` is a Quarter gateway in front of a mock vendor: no model is called and nothing costs anything. Everyone trying it shares it, and it is wiped every night (04:00 Pacific), so send nothing real.
+
+- Agent key: `qa_try6d027c751e3aed17512402058c`
+- Approver sign-in for the dashboard (any username): `try-approver-b7f88ef061bd`
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="https://sandbox.quarterfi.com/openai/v1", api_key="qa_try6d027c751e3aed17512402058c")
+reply = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}],
+                                       extra_headers={"x-quarter-customer": "acme", "x-quarter-task": "first-try"})
+print(reply.choices[0].message.content)
+```
+
+Anthropic works the same way at `https://sandbox.quarterfi.com/anthropic`. Ask `gpt-4o` for `max_tokens=8000` (up to about $0.08, over the sandbox's $0.05 line) and the call is held for a person: the SDK raises `PermissionDeniedError` with an `approval_id`. Approve it at `https://sandbox.quarterfi.com/dashboard` with the approver sign-in, or with `curl -X POST -H "x-quarter-key: try-approver-b7f88ef061bd" https://sandbox.quarterfi.com/approvals/<approval_id>/approve`, then send the same call again with the header `x-quarter-approval: <approval_id>`. Each agent may spend $10 a day there, and everyone together $100.
 
 ## Contents
 
 - [Install](#install)
 - [Try it in two minutes](#try-it-in-two-minutes)
+- [Try the hosted sandbox](#try-the-hosted-sandbox-nothing-to-install)
 - [What it is](#what-it-is)
 - [Run it](#run-it)
 - [For individuals](#for-individuals)
@@ -80,7 +99,7 @@ Point an agent at the gateway and give it the agent key from `.env` as its API k
 client = OpenAI(base_url="http://127.0.0.1:8780/openai/v1", api_key="qa_...")
 ```
 
-No vendor key yet? `python3 deploy/hosted/mock_upstream.py` answers OpenAI and Anthropic chat calls on port 8790 with a canned reply and real-looking usage, for free. Put `{"openai": "http://127.0.0.1:8790", "anthropic": "http://127.0.0.1:8790"}` in `upstreams.json`, any `OPENAI_API_KEY` value in `.env`, and add `--upstreams upstreams.json` to `serve`.
+No vendor key yet? `python3 -m quarter_ledger.mock_upstream` (or `uv run python -m quarter_ledger.mock_upstream` in a checkout) answers OpenAI and Anthropic chat calls on port 8790 with a canned reply and real-looking usage, for free. Put `{"openai": "http://127.0.0.1:8790", "anthropic": "http://127.0.0.1:8790"}` in `upstreams.json`, any `OPENAI_API_KEY` value in `.env`, and add `--upstreams upstreams.json` to `serve`.
 
 The gateway sees its own key, swaps in the vendor key from its environment, and records the call. `serve` with no flags and no environment also runs, on localhost, with no caps and agents sending their own vendor keys.
 

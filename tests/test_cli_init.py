@@ -13,7 +13,7 @@ def test_init_writes_a_usable_config_once(tmp_path):
     assert cap.window == "month" and "$40" in message
     assert sorted(p.name for p in tmp_path.iterdir()) == [".env", "caps.json"]
     env = (tmp_path / ".env").read_text()
-    assert f"QUARTER_CAPS={tmp_path.resolve() / 'caps.json'}\n" in env
+    assert "QUARTER_CAPS=caps.json\n" in env  # relative: the folder can move or be mounted
     assert "# OPENAI_API_KEY=\n" in env
     assert (tmp_path / ".env").stat().st_mode & 0o077 == 0
     with pytest.raises(SystemExit):
@@ -158,3 +158,30 @@ def test_serve_reads_max_wait(tmp_path, monkeypatch):
         monkeypatch.setenv("QUARTER_MAX_WAIT", bad)
         with pytest.raises(SystemExit):
             cli.main(["--db", str(tmp_path / "l.db"), "serve"])
+
+
+def test_env_file_is_read_before_the_defaults(tmp_path, monkeypatch):
+    from quarter_ledger import cli
+
+    monkeypatch.delenv("QUARTER_DB", raising=False)
+    monkeypatch.delenv("QUARTER_ENVFILE_CHECK", raising=False)
+    env = tmp_path / ".env"
+    env.write_text(f"# a comment\nQUARTER_DB={tmp_path / 'from-env.db'}\nQUARTER_ENVFILE_CHECK='[1, 2]'\n")
+    monkeypatch.setattr(cli, "Ledger", lambda path: (_ for _ in ()).throw(SystemExit(path)))
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--env-file", str(env), "paused"])
+    assert e.value.code == str(tmp_path / "from-env.db")
+    import os
+    assert os.environ["QUARTER_ENVFILE_CHECK"] == "[1, 2]"  # quotes stripped, as uv does
+    with pytest.raises(SystemExit, match="env file not found"):
+        cli.main(["--env-file", str(tmp_path / "missing.env"), "paused"])
+
+
+def test_outgoing_calls_say_they_are_quarter(tmp_path, monkeypatch):
+    import urllib.request
+
+    from quarter_ledger import cli
+
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    cli.main(["--db", str(tmp_path / "l.db"), "paused"])
+    assert urllib.request._opener.addheaders[0][1].startswith("quarter-ledger/")

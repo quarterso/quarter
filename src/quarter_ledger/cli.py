@@ -79,6 +79,7 @@ import os
 import signal
 import sqlite3
 import sys
+import urllib.request
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -323,7 +324,7 @@ def init(folder: Path, monthly: str, approve_above: str) -> str:
         ),
         ".env": f"QUARTER_AGENT_KEYS=first-agent=qa_{secrets.token_hex(16)}\n"
         f"QUARTER_ADMIN_KEY={secrets.token_hex(16)}\n"
-        f"QUARTER_CAPS={(folder / 'caps.json').resolve()}\n"
+        "QUARTER_CAPS=caps.json\n"  # relative, so the folder can move or be mounted at /app
         f"{vendor_keys}",
     }
     folder.mkdir(parents=True, exist_ok=True)
@@ -338,7 +339,9 @@ def init(folder: Path, monthly: str, approve_above: str) -> str:
     return (
         f"Your agents may spend ${monthly} a month in total; calls over ${approve_above}, and any"
         " past that budget, wait for you.\n"
-        "Keys are in .env; add your vendor keys there. Start with: uv run --env-file .env quarter-ledger serve"
+        "Keys are in .env; add your vendor keys there. Start, from this folder, with:\n"
+        "  quarter-ledger --env-file .env serve\n"
+        "The dashboard's password is QUARTER_ADMIN_KEY in .env (any username)."
     )
 
 
@@ -462,7 +465,8 @@ def run_serve(args, ledger):
     if key and key.startswith("ed25519:"):
         print(f"payments are authorised with key {public_key(key)}", flush=True)
     if admin_key or people:
-        print(f"dashboard on http://{args.host}:{args.port}/dashboard", flush=True)
+        print(f"dashboard on http://{args.host}:{args.port}/dashboard (any username; the password is"
+              f" {'QUARTER_ADMIN_KEY' if admin_key else 'your own key from QUARTER_PEOPLE'})", flush=True)
     if os.environ.get("QUARTER_FEED"):
         own_prices = config(args.prices) if args.prices else None
         try:
@@ -1378,6 +1382,8 @@ def run_paused(args, ledger):
 
 def parser() -> argparse.ArgumentParser:
     top = argparse.ArgumentParser(prog="quarter-ledger")
+    top.add_argument("--env-file", metavar="FILE", help="read settings from FILE first, such as the .env init writes")
+    top.add_argument("--version", action="version", version=f"%(prog)s {package_version()}")
     top.add_argument("--db", default=os.environ.get("QUARTER_DB", "ledger.db"))
     sub = top.add_subparsers(dest="command", required=True)
 
@@ -1703,7 +1709,49 @@ def parser() -> argparse.ArgumentParser:
     return top
 
 
+def package_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("quarter-ledger")
+    except PackageNotFoundError:
+        return "unknown"
+
+
+def load_env_file(argv: list[str]) -> None:
+    """--env-file, read before the parser, whose defaults come from the environment. KEY=VALUE
+    lines; a value may be wrapped in single or double quotes; # starts a comment line. A variable
+    already set in the environment wins, as with uv and docker."""
+    for i, arg in enumerate(argv):
+        if arg == "--env-file" and i + 1 < len(argv):
+            path = argv[i + 1]
+        elif arg.startswith("--env-file="):
+            path = arg.split("=", 1)[1]
+        else:
+            continue
+        try:
+            lines = Path(path).read_text().splitlines()
+        except FileNotFoundError:
+            raise SystemExit(f"env file not found: {path}") from None
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.removeprefix("export ").partition("=")
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            os.environ.setdefault(name.strip(), value)
+        return
+
+
 def main(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    load_env_file(argv)
+    # Python's default user agent is refused by some sites (Cloudflare's Browser Integrity Check)
+    opener = urllib.request.build_opener()
+    opener.addheaders = [("User-Agent", f"quarter-ledger/{package_version()}")]
+    urllib.request.install_opener(opener)
     args = parser().parse_args(argv)
     if args.command == "verify-chain" and not os.path.exists(args.db):
         sys.exit(f"no ledger at {args.db}")  # opening it would make an empty one, which checks out

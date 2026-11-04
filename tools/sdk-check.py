@@ -10,23 +10,21 @@ raised, its message, and how many requests the gateway read (more than one is th
 retry). Exits 1 if any check fails. Costs nothing and reaches nothing but this machine.
 """
 
-import importlib.util
 import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import anthropic
 import openai
 
+from quarter_ledger import mock_upstream
 from quarter_ledger.money import to_micros
 from quarter_ledger.policy import Cap
 from quarter_ledger.pricing import PriceBook, with_built_in
 from quarter_ledger.proxy import LOGIN_FAILURES, Gateway, serve
 from quarter_ledger.store import Ledger
 
-MOCK = Path(__file__).resolve().parent.parent / "deploy" / "hosted" / "mock_upstream.py"
 KEYS = {name: f"qa_sdkcheck_{name}" for name in ("ok", "capped", "held", "paused")}
 CHAT = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 50}
 MESSAGE = {"model": "claude-haiku-4-5", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 50}
@@ -51,10 +49,7 @@ def start(server):
 
 
 def gateway(folder: str) -> tuple[str, Gateway]:
-    spec = importlib.util.spec_from_file_location("mock_upstream", MOCK)
-    mock = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mock)
-    base = f"http://127.0.0.1:{start(ThreadingHTTPServer(('127.0.0.1', 0), mock.Handler)).server_port}"
+    base = f"http://127.0.0.1:{start(ThreadingHTTPServer(('127.0.0.1', 0), mock_upstream.Handler)).server_port}"
     hangs_up = f"http://127.0.0.1:{start(ThreadingHTTPServer(('127.0.0.1', 0), HangsUp)).server_port}"
     ledger = Ledger(f"{folder}/ledger.db")
     ledger.pause("paused", "sdk-check paused it")

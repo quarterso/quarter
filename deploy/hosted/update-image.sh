@@ -36,7 +36,8 @@ EOF
 
 python3 "$here/render.py" "$tenants" "$out" >/dev/null
 rsync -a "$out/" "$box:/opt/quarter/"
-ssh "$box" 'cd /opt/quarter && sudo docker compose up -d >/dev/null'
+# Compose does not see a changed litestream.yml, so restart Litestream to read it.
+ssh "$box" 'cd /opt/quarter && sudo docker compose up -d >/dev/null && if sudo docker compose config --services | grep -qx litestream; then sudo docker compose restart litestream >/dev/null 2>&1; fi'
 domain=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['domain'])" "$tenants")
 
 failed=0

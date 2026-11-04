@@ -36,7 +36,7 @@ SANDBOX_ENV = {
     "QUARTER_UPSTREAMS": json.dumps({"openai": MOCK_URL, "anthropic": MOCK_URL}),
     "QUARTER_VENDOR_KEYS": json.dumps({"openai": "sandbox", "anthropic": "sandbox"}),
     "QUARTER_CAPS": json.dumps([
-        {"scope": "agent", "key": "*", "window": "day", "limit_usd": "1", "approve_above_usd": "0.05"},
+        {"scope": "agent", "key": "*", "window": "day", "limit_usd": "10", "approve_above_usd": "0.05"},  # the public visitor key is one agent
         {"scope": "all", "window": "day", "limit_usd": "100"},  # high: every prospect shares it
     ]),
 }
@@ -98,7 +98,7 @@ def compose(box: dict) -> str:
         "  caddy:",
         f"    image: {CADDY}",
         "    restart: unless-stopped",
-        "    volumes: [./Caddyfile:/etc/caddy/Caddyfile:ro]",
+        "    volumes: [./caddy:/etc/caddy:ro]",  # the folder, so a rewritten Caddyfile is seen by a reload
         f"    networks: [edge, {', '.join(own.values())}]",
     ]
     for t in box["tenants"]:
@@ -125,9 +125,8 @@ def compose(box: dict) -> str:
                 f"    image: quarter-ledger:{t['tag']}",
                 "    restart: unless-stopped",
                 "    init: true",
-                "    entrypoint: [python, /mock/mock_upstream.py]",
+                "    entrypoint: [python, -m, quarter_ledger.mock_upstream]",
                 '    environment: {PORT: "8790"}',
-                "    volumes: [./mock_upstream.py:/mock/mock_upstream.py:ro]",
                 "    mem_limit: 32m",
                 f"    networks: {{{own[name]}: {{aliases: [{name}]}}}}",  # Caddy reaches the gateway as {name}
             ]
@@ -159,7 +158,7 @@ def compose(box: dict) -> str:
 
 def caddyfile(box: dict) -> str:
     out = ["# TLS ends at Cloudflare; the tunnel reaches Caddy over plain HTTP.",
-           "{", "\tauto_https off", "\tadmin off", "}", ""]
+           "{", "\tauto_https off", "\tadmin localhost:2019", "}", ""]  # inside Caddy's container only: add-tenant reloads
     for t in box["tenants"]:
         out += [f"http://{t['name']}.{box['domain']} {{", f"\treverse_proxy {t['name']}:8780", "}", ""]
     out += ["http:// {", "\trespond 404", "}"]
@@ -171,12 +170,19 @@ def litestream(box: dict) -> str:
         "# Bucket and keys come from env/litestream.env.",
         "access-key-id: ${LITESTREAM_ACCESS_KEY_ID}",
         "secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}",
+        # Fewer bucket calls: Litestream's defaults make about 12 a minute per idle ledger,
+        # 10 times Oracle's free 50,000 a month (docs/HOSTED.md, "Backup request budget").
+        "l0-retention-check-interval: 5m",
+        "levels:",
+        "  - interval: 5m",
+        "  - interval: 1h",
         "dbs:",
     ]
     for t in box["tenants"]:
         if not t["sandbox"]:
             out += [
                 f"  - path: /data/{t['name']}/ledger.db",
+                "    monitor-interval: 1m",  # one upload per minute of changes, not one per second
                 "    replica:",
                 "      type: s3",
                 "      bucket: ${LITESTREAM_BUCKET}",
@@ -184,7 +190,7 @@ def litestream(box: dict) -> str:
                 "      endpoint: ${LITESTREAM_ENDPOINT}",
                 "      region: ${LITESTREAM_REGION}",
                 "      force-path-style: true",  # Oracle Object Storage needs it; R2 and B2 accept it
-                "      sync-interval: 10s",  # R2 bills each upload; see docs/HOSTED.md
+                "      sync-interval: 1m",
             ]
     return "\n".join(out) + "\n"
 
@@ -199,14 +205,11 @@ def cloudflared(box: dict) -> str:
 
 
 def render(box: dict, out: Path) -> list[str]:
-    files = {"compose.yaml": compose(box), "Caddyfile": caddyfile(box),
+    files = {"compose.yaml": compose(box), "caddy/Caddyfile": caddyfile(box),
              "litestream.yml": litestream(box), "cloudflared.yml": cloudflared(box)}
-    out.mkdir(parents=True, exist_ok=True)
+    (out / "caddy").mkdir(parents=True, exist_ok=True)
     for name, text in files.items():
         (out / name).write_text(text)
-    if any(t["sandbox"] for t in box["tenants"]):
-        shutil.copy(HERE / "mock_upstream.py", out / "mock_upstream.py")
-        files["mock_upstream.py"] = ""
     shutil.copy(HERE / "nightly_backup.py", out / "nightly_backup.py")
     files["nightly_backup.py"] = ""
     if (HERE / "backup-recipient.txt").exists():  # made by backup-key.sh; public

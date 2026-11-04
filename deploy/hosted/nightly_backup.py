@@ -135,9 +135,11 @@ def ping(root, name, fail=False):
 
 
 def litestream_ok(root):
-    logs = subprocess.run(["docker", "compose", "--project-directory", str(root), "logs", "--since", "65m",
-                           "litestream"], check=True, capture_output=True, text=True).stdout
-    return "level=ERROR" not in logs
+    def compose(*args):
+        return subprocess.run(["docker", "compose", "--project-directory", str(root), *args],
+                              check=True, capture_output=True, text=True).stdout
+    running = compose("ps", "--status", "running", "--services")  # a stopped Litestream logs no errors
+    return "litestream" in running.split() and "level=ERROR" not in compose("logs", "--since", "65m", "litestream")
 
 
 def nightly(root):

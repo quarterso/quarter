@@ -758,6 +758,8 @@ def test_refusals_are_in_openais_error_shape_so_its_sdk_reads_them(gateway):
     status, _, body = answer(url + "/fake/v1/chat", {"model": "m"}, {})
     assert status == 401 and body["error"]["type"] == "authentication_error" and body["error"]["code"] is None
     assert body["error"]["message"].startswith("Quarter refused this call: a Quarter agent key is required")
+    status, _, body = answer(url + "/fake/v1/chat", {"model": "m"}, {"authorization": "Bearer sk-not-ours"})
+    assert status == 401 and "not an agent key of this gateway" in body["error"]["message"]
     status, _, body = answer(url + "/nope/v1/chat", {"model": "m"})
     assert status == 404 and body["error"]["message"] == "Quarter refused this call: unknown vendor nope"
 
