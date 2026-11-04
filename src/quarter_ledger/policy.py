@@ -116,12 +116,14 @@ def decide(
             continue
         label = cap_label(cap, target)
         over = spent(cap.scope, target, window_start(cap.window, now)) + estimate > cap.limit
+        # Fixed text, no amounts: the shadow report groups reasons by their exact words.
+        why = f"{label}: one call over the whole {cap.window} cap" if estimate > cap.limit else f"{label}: {cap.window} cap reached"
         if over and cap.over == "block":
-            return Decision("block", f"{label}: {cap.window} cap reached")
+            return Decision("block", why)
         if skip_approval:
             continue
         if over:
-            reasons.append(f"{label}: {cap.window} cap reached")
+            reasons.append(why)
         elif cap.approve_above is not None and estimate > cap.approve_above and not skip_line:
             reasons.append(f"{label}: call over approval limit")
     return Decision("approve", "; ".join(reasons)) if reasons else Decision("allow")

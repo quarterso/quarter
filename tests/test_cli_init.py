@@ -93,6 +93,8 @@ def test_all_scope_caps_every_agent_together(tmp_path):
             ledger.settle(call, 600_000)
     assert ledger.spent("all", "all", None) == 600_000
     decision = decide(caps, {"agent": "a"}, 2_000_000, lambda *a: 0)
+    assert decision.reason == "all spend: one call over the whole month cap"
+    decision = decide(caps, {"agent": "a"}, 500_000, lambda *a: 600_000)
     assert decision.reason == "all spend: month cap reached"
 
 

@@ -29,6 +29,8 @@ anthropic, gemini and openrouter are built in; these files extend or override th
                       `cards reconcile`; QUARTER_RAMP_URL for the sandbox
   OPENAI_ADMIN_KEY, ANTHROPIC_ADMIN_KEY  your own admin keys, read only by reconcile and connect
                       to fetch the vendor's costs
+  STRIPE_REVENUE_KEY  a restricted Stripe key (rk_) that can read invoices and customers, for
+                      `margin --stripe`; Quarter refuses a full secret key
   QUARTER_LITELLM_URL, QUARTER_LITELLM_KEY, QUARTER_OPENROUTER_MANAGEMENT_KEY,
   QUARTER_CLOUDFLARE_TOKEN, QUARTER_CLOUDFLARE_ACCOUNT, QUARTER_CLOUDFLARE_GATEWAY  read-only
                       access for `connect` (sources.py)
@@ -118,7 +120,7 @@ from .export import (
 from .failopen import FailOpenLog, ingest
 from .feed import Feed, sign_feed
 from .insights import forecast
-from .margin import margins, read_revenue
+from .margin import STRIPE_KEY_ENV, margins, read_revenue, stripe_revenue
 from .money import to_micros, usd_display, usd_shown
 from .policy import load_caps
 from .pricing import PriceBook, with_built_in
@@ -428,6 +430,7 @@ def run_serve(args, ledger):
         signing_key=key,
         stripe_secret=os.environ.get("QUARTER_STRIPE_SECRET") or None,
         stripe_approvals_secret=os.environ.get("QUARTER_STRIPE_APPROVALS_SECRET") or None,
+        stripe_revenue_key=os.environ.get(STRIPE_KEY_ENV) or None,
         org=org,
         mercury=mercury_from_env(),
         runaway=load_runaway(os.environ.get("QUARTER_RUNAWAY")),
@@ -988,10 +991,20 @@ def run_capitalise(args, ledger):
 
 
 def run_margin(args, ledger):
-    try:
-        revenue = read_revenue(Path(args.revenue).read_text())
-    except (OSError, ValueError) as e:
-        sys.exit(f"margin: {args.revenue}: {e}")
+    notes = None
+    if args.stripe:
+        key = os.environ.get(STRIPE_KEY_ENV)
+        if not key:
+            sys.exit(f"margin: set {STRIPE_KEY_ENV} to a restricted Stripe key that can read invoices and customers")
+        try:
+            revenue, notes = stripe_revenue(key, args.month)
+        except ValueError as e:
+            sys.exit(f"margin: Stripe {e}")
+    else:
+        try:
+            revenue = read_revenue(Path(args.revenue).read_text())
+        except (OSError, ValueError) as e:
+            sys.exit(f"margin: {args.revenue}: {e}")
     out = margins(ledger, args.month, revenue)
 
     def signed(micros):  # usd_display rounds negatives the wrong way
@@ -1010,6 +1023,10 @@ def run_margin(args, ledger):
             writer.writerow([r["customer"], signed(r["revenue"]), signed(r["ai_cost"]), signed(r["margin"]),
                              pct(r["margin_pct"]).rstrip("%")])
         return
+    if notes:
+        print(f"Stripe: {notes['invoices']} invoice(s) paid in {out['month']}, excluding tax, less credit notes"
+              + (f"; {notes['skipped_currency']} not in USD left out" if notes["skipped_currency"] else "")
+              + ("; TEST MODE data" if notes["test_mode"] else ""))
     print(f"{out['month']}: revenue {usd(out['revenue'])}, AI cost {usd(out['ai_cost'])},"
           f" margin after AI cost {usd(out['margin'])} {pct(out['margin_pct'])}".rstrip())
     for r in out["rows"]:
@@ -1463,8 +1480,10 @@ def parser() -> argparse.ArgumentParser:
 
     mg = command("margin", run_margin, "margin after AI cost, by customer")
     month(mg)
-    mg.add_argument("--revenue", required=True,
-                    help="CSV of revenue that month: a customer column and an amount column")
+    source = mg.add_mutually_exclusive_group(required=True)
+    source.add_argument("--revenue", help="CSV of revenue that month: a customer column and an amount column")
+    source.add_argument("--stripe", action="store_true",
+                        help=f"read revenue from Stripe: invoices paid that month ({STRIPE_KEY_ENV})")
     mg.add_argument("--csv", action="store_true")
 
     cn = command("connect", lambda a, ledger: sources.run(a, ledger, caps_from(a.caps)),

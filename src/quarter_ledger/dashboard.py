@@ -262,6 +262,40 @@ def _free_limit(ledger: Ledger, now: datetime) -> str:
             " free. Calls are still decided; each reply carries <code>x-quarter-free-limit: exceeded</code>.</p>")
 
 
+def _margin(m: dict | str | None) -> str:
+    """Revenue from Stripe against AI cost, per customer, worst margin first."""
+    if m is None:
+        return ""
+    if isinstance(m, str):
+        return f"<h2>Margin after AI cost</h2><p class=empty>{escape(m)}</p>"
+
+    def money(micros: int) -> str:
+        return ("-" if micros < 0 else "") + usd(abs(micros))
+
+    def pct(value) -> str:
+        return "" if value is None else f"{value:.1f}%"
+
+    rows = "".join(
+        f"<tr><td>{escape(r['customer'])}</td><td class=n>{money(r['revenue'])}</td>"
+        f"<td class=n>{money(r['ai_cost'])}</td><td class='n{' neg' if r['margin'] < 0 else ''}'>{money(r['margin'])}</td>"
+        f"<td class=n>{pct(r['margin_pct'])}</td></tr>" for r in m["rows"])
+    notes = m.get("stripe") or {}
+    said = [f"{notes.get('invoices', 0)} Stripe invoice(s) paid this month, excluding tax"]
+    if notes.get("skipped_currency"):
+        said.append(f"{notes['skipped_currency']} not in USD left out")
+    if notes.get("test_mode"):
+        said.append("test mode data")
+    if m["unassigned_cost"]:
+        said.append(f"{usd(m['unassigned_cost'])} of AI spend named no customer")
+    return (f"<h2>Margin after AI cost</h2><div class=cards>"
+            f"<div class=card><b>{money(m['revenue'])}</b>Revenue</div>"
+            f"<div class=card><b>{money(m['ai_cost'])}</b>AI cost to serve</div>"
+            f"<div class=card><b>{money(m['margin'])} {pct(m['margin_pct'])}</b>Margin after AI cost</div></div>"
+            + (f"<table><tr><th>Customer</th><th class=n>Revenue</th><th class=n>AI cost</th>"
+               f"<th class=n>Margin</th><th class=n>%</th></tr>{rows}</table>" if rows else "")
+            + f"<p class=sub>{escape('; '.join(said))}.</p>")
+
+
 def _picker(ledger: Ledger, chosen: str, now: datetime) -> str:
     """A month to show: each from the first one with spend to this one, newest first."""
     first = ledger.db.execute("select min(at) from entries").fetchone()[0]
@@ -309,12 +343,14 @@ def _centres(centres: dict[str, dict[str, str]], agents: set[str], version: str)
 
 def render(ledger: Ledger, caps: list[Cap], signed_in: str = "", can_decide: bool = True,
            shadow: list[str] | None = None, keys=(), month: str | None = None, finance: bool = False,
-           centres: dict[str, dict[str, str]] | None = None, centres_version: str = "") -> str:
+           centres: dict[str, dict[str, str]] | None = None, centres_version: str = "",
+           margin: dict | str | None = None) -> str:
     """Without can_decide, the Approve, Deny and Resume buttons are left out. shadow names
     the rules that record instead of refusing (Gateway.in_shadow). keys: the agents with a
     named key, for the register. month (YYYY-MM, this month if None) is the month every spend
     figure covers; caps and the forecast are shown for this month only, and what waits for a
-    person always. finance adds the month's files and, with centres, the cost centre form."""
+    person always. finance adds the month's files and, with centres, the cost centre form.
+    margin: margin.margins for the month with Stripe's notes, or why Stripe could not be read."""
     who = f"Signed in as {escape(signed_in)}" if signed_in else "Ledger"
     now = datetime.now(UTC)
     month = month or f"{now:%Y-%m}"
@@ -362,6 +398,7 @@ def render(ledger: Ledger, caps: list[Cap], signed_in: str = "", can_decide: boo
 <h2>Cost per agent</h2>{_agents(summary)}
 {_register(ledger, keys, now)}
 {_tasks(top_tasks(ledger, start, until=end))}
+{_margin(margin)}
 {_table("By customer", by_customer)}
 {_table("By agent", by_agent)}
 {_table("By vendor", by_vendor)}

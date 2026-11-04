@@ -226,3 +226,38 @@ def test_render_escapes_centre_and_agent_names(tmp_path):
     page = render(ledger, [], "Fay (finance)", True, finance=True, month=OCTOBER,
                   centres={"department": {"<script>": "a'b\"c"}}, centres_version="v")
     assert "<script>" not in page and "&lt;script&gt;" in page and "a&#x27;b&quot;c" in page
+
+
+def test_finance_sees_margin_from_stripe_read_at_most_every_ten_minutes(books, monkeypatch):
+    url, ledger, _ = books
+    reads = []
+
+    def fake(key, month):
+        reads.append(month)
+        return {"acme": 5_000_000, "initech": 1_000_000}, {"invoices": 3, "skipped_currency": 0, "test_mode": True}
+
+    monkeypatch.setattr("quarter_ledger.proxy.stripe_revenue", fake)
+    gw = Gateway(ledger, [], PRICES, {}, {AGENT_KEY}, ADMIN_KEY, people=PEOPLE, stripe_revenue_key="rk_test_x")
+    proxy = start(serve(gw, port=0))
+    there = f"http://127.0.0.1:{proxy.server_port}"
+    try:
+        page = get(f"{there}/dashboard?month={OCTOBER}", "Fay")[2].decode()
+        assert "Margin after AI cost" in page and "test mode data" in page
+        assert "<td>acme</td><td class=n>$5.00</td><td class=n>$2.00</td><td class='n'>$3.00</td>" in page
+        get(f"{there}/dashboard?month={OCTOBER}", "Ada")
+        assert reads == [OCTOBER]  # the second page view reused it
+        assert "Margin after AI cost" not in get(f"{there}/dashboard?month={OCTOBER}", "Ann")[2].decode()
+    finally:
+        proxy.shutdown()
+
+
+def test_margin_says_why_when_stripe_cannot_be_read(books, monkeypatch):
+    _, ledger, _ = books
+
+    def broken(key, month):
+        raise ValueError("answered 401: invalid key")
+
+    monkeypatch.setattr("quarter_ledger.proxy.stripe_revenue", broken)
+    gw = Gateway(ledger, [], PRICES, {}, {AGENT_KEY}, ADMIN_KEY, stripe_revenue_key="rk_test_x")
+    page = render(ledger, [], month=OCTOBER, finance=True, margin=gw.margin(OCTOBER))
+    assert "Stripe answered 401: invalid key" in page

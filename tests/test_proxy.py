@@ -646,7 +646,7 @@ def test_a_cap_set_to_ask_lets_a_person_pass_one_call(tmp_path):
         assert call(url + "/authorize", pay, approved)[0] == 200
         # A cap left to block still blocks, and no one is asked.
         status, body = call(url + "/authorize", {**pay, "amount_usd": "6"}, {**HEADERS, "x-quarter-customer": "acme"})
-        assert status == 402 and json.loads(body)["reason"] == "customer acme: month cap reached"
+        assert status == 402 and json.loads(body)["reason"] == "customer acme: one call over the whole month cap"
     finally:
         server.shutdown()
 

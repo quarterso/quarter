@@ -24,7 +24,7 @@ def test_a_cap_in_shadow_lets_the_call_through_and_records_what_it_would_have_he
     caps = load_caps([{"scope": "agent", "key": "bot", "window": "day", "limit_usd": "1", "mode": "shadow"}])
     decision, call_id = ledger.hold(caps, BOT, "openai", "m", to_micros(2))
     assert decision.outcome == "allow" and call_id
-    assert decision.would_hold.outcome == "block" and "day cap reached" in decision.would_hold.reason
+    assert decision.would_hold.outcome == "block" and "over the whole day cap" in decision.would_hold.reason
     [row] = would_holds(ledger)
     assert row["call_id"] == call_id and row["amount"] == to_micros(2) and row["outcome"] == "block"
     ledger.settle(call_id, to_micros("1.5"))  # spend is recorded exactly as when enforced
@@ -113,7 +113,7 @@ def test_model_call_over_a_shadow_cap_reaches_the_vendor(tmp_path):
             assert resp.status == 200 and resp.headers["x-quarter-shadow"] == "would_block"
         assert len(FakeVendor.calls) == 1
         assert ledger.totals("customer") == [("acme", "fake", to_micros("0.002"))]
-        assert would_holds(ledger)[0]["reason"] == "customer acme: month cap reached"
+        assert would_holds(ledger)[0]["reason"] == "customer acme: one call over the whole month cap"
     finally:
         proxy.shutdown()
         vendor.shutdown()

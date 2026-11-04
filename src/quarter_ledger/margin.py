@@ -6,17 +6,24 @@ margin after AI cost only; hosting, support and other cost of revenue are not he
 """
 
 import csv
+import urllib.parse
+from datetime import timedelta
 from decimal import Decimal
 from io import StringIO
 from math import ceil
 from statistics import median
 
 from .money import to_micros
+from .reconcile import _get
 from .store import Ledger, month_range
 
 CUSTOMER_COLUMNS = ("customer", "customer_id", "customer id", "customer name")
 AMOUNT_COLUMNS = ("amount_usd", "amount", "revenue", "amount paid", "total")
 HEAVY_SHARE = 0.05  # the heaviest 5% of customers by AI cost
+STRIPE_URL = "https://api.stripe.com"
+STRIPE_KEY_ENV = "STRIPE_REVENUE_KEY"
+STRIPE_LOOKBACK = timedelta(days=120)  # an invoice paid this month may have been created months before
+STRIPE_MAX_PAGES = 500
 
 
 def read_revenue(text: str) -> dict[str, int]:
@@ -46,6 +53,53 @@ def read_revenue(text: str) -> dict[str, int]:
             raise ValueError(f"line {line}: no customer")
         out[who] = out.get(who, 0) + value
     return out
+
+
+def stripe_customer(invoice: dict) -> str:
+    """The name Quarter books a Stripe customer under: the customer's `quarter_customer`
+    metadata when set (so it can match the customer your agents send), else the name on
+    the invoice, else the Stripe customer id."""
+    customer = invoice.get("customer")
+    meta = (customer.get("metadata") or {}) if isinstance(customer, dict) else {}
+    cid = customer.get("id") if isinstance(customer, dict) else customer
+    return (meta.get("quarter_customer") or invoice.get("customer_name") or cid or "").strip()
+
+
+def stripe_revenue(key: str, month: str, base: str = STRIPE_URL) -> tuple[dict[str, int], dict]:
+    """Revenue by customer for the month from Stripe, read-only: invoices paid that month
+    (cash basis), excluding tax, less credit notes issued after payment. USD only; other
+    currencies are counted and left out. Needs a restricted key that can read invoices and
+    customers, nothing else."""
+    if not key.startswith("rk_"):
+        raise ValueError("use a restricted key (rk_...) with read access to invoices and customers;"
+                         " Quarter never needs a full secret key")
+    start, end = month_range(month)
+    params = [("status", "paid"), ("limit", "100"), ("expand[]", "data.customer"),
+              ("created[gte]", str(int((start - STRIPE_LOOKBACK).timestamp()))),
+              ("created[lt]", str(int(end.timestamp())))]
+    headers = {"Authorization": f"Bearer {key}"}
+    out: dict[str, int] = {}
+    notes = {"invoices": 0, "skipped_currency": 0, "test_mode": False}
+    after = None
+    for _ in range(STRIPE_MAX_PAGES):
+        query = urllib.parse.urlencode(params + ([("starting_after", after)] if after else []))
+        page = _get(f"{base}/v1/invoices?{query}", headers, key)
+        for inv in page.get("data") or []:
+            paid = (inv.get("status_transitions") or {}).get("paid_at")
+            if not paid or not start.timestamp() <= paid < end.timestamp():
+                continue
+            if inv.get("currency") != "usd":
+                notes["skipped_currency"] += 1
+                continue
+            cents = (inv.get("total_excluding_tax") or 0) - (inv.get("post_payment_credit_notes_amount") or 0)
+            who = stripe_customer(inv)
+            out[who] = out.get(who, 0) + cents * 10_000
+            notes["invoices"] += 1
+            notes["test_mode"] |= inv.get("livemode") is False
+        if not page.get("has_more") or not page.get("data"):
+            return out, notes
+        after = page["data"][-1]["id"]
+    raise ValueError(f"more than {STRIPE_MAX_PAGES} pages of invoices; stopped")
 
 
 def ai_cost(ledger: Ledger, month: str) -> tuple[dict[str, int], int]:

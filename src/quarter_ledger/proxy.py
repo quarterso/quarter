@@ -91,6 +91,7 @@ from .export import FORMATS, centre_headers, focus, focus_rows, journal, read_ce
 from .failopen import FailOpenLog
 from .feed import payee_flags
 from .insights import forecast
+from .margin import margins, stripe_revenue
 from .money import MAX_AMOUNT, to_micros, usd_display
 from .payments import AUTH_TTL, RAILS, authorisation, payee_rule, x402_settlement
 from .policy import Cap, Decision, Shadow, cap_label
@@ -153,6 +154,7 @@ REQUEST_DEADLINE = 60
 MAX_CONNECTIONS = 256
 BUDGET_CHECK_EVERY = 60  # seconds between forecast checks
 LOGIN_FAILURES, LOGIN_WINDOW = 10, 300  # wrong admin keys allowed per client per 5 minutes
+REVENUE_TTL = 600  # seconds the dashboard reuses revenue read from Stripe
 MAX_WAIT = 300  # seconds a call may wait for its approval, unless QUARTER_MAX_WAIT says less
 MAX_TRACKED = 10_000  # tasks whose recent tool calls and cache hit rates are kept in memory
 COLLAPSE_CALLS = 3  # calls in a row under half a task's usual cache hit rate
@@ -216,6 +218,7 @@ class Gateway:
     signing_key: str | None = field(default=None, repr=False)  # signs approval receipts
     stripe_secret: str | None = field(default=None, repr=False)  # Stripe Issuing endpoint's whsec_
     stripe_approvals_secret: str | None = field(default=None, repr=False)  # approval events endpoint's whsec_
+    stripe_revenue_key: str | None = field(default=None, repr=False)  # rk_ read key: margin on the dashboard
     org: str | None = None  # the company's domain: named in spend mandates sellers check
     mercury: dict | None = field(default=None, repr=False)  # {token, account, url}: pays bills
     runaway: RunawayRule | None = field(default_factory=RunawayRule)
@@ -238,6 +241,7 @@ class Gateway:
     _waiting: dict[str, threading.Event] = field(default_factory=dict, repr=False)
     _tool_calls: dict[str, list[tuple[float, str, str, str]]] = field(default_factory=dict, repr=False)
     _hits: dict[str, tuple[float, int, int, bool]] = field(default_factory=dict, repr=False)
+    _revenue: dict[str, tuple[float, object]] = field(default_factory=dict, repr=False)
     _shown: set[str] = field(default_factory=set, repr=False)  # approvals whose outcome Slack has
     _checks: queue.SimpleQueue | None = field(default=None, repr=False)  # agents to check after spend
     _to_check: set[str] = field(default_factory=set, repr=False)  # those queued and not yet checked
@@ -301,6 +305,19 @@ class Gateway:
         approvers |= set(self.slack.users.values()) if self.slack else set()
         approvers |= {LEGACY_ADMIN} if self.admin_key else set()
         return Shadow(self.mode == "shadow", self.payees.get("mode") == "shadow", tuple(sorted(approvers)))
+
+    def margin(self, month: str) -> dict | str:
+        """Margin after AI cost for the month, with revenue read from Stripe at most every
+        10 minutes per month; the reason as text when Stripe could not be read."""
+        now = time.monotonic()
+        at, got = self._revenue.get(month, (-1e9, None))
+        if now - at > REVENUE_TTL:
+            try:
+                got = stripe_revenue(self.stripe_revenue_key, month)
+            except ValueError as e:
+                got = f"Stripe {e}"
+            self._revenue[month] = (now, got)
+        return got if isinstance(got, str) else margins(self.ledger, month, got[0]) | {"stripe": got[1]}
 
     def in_shadow(self) -> list[str]:
         """Each rule that records instead of refusing, in words, for startup and the dashboard."""
@@ -945,8 +962,9 @@ class Handler(BaseHTTPRequestHandler):
                 centres, version = self.gw.centres()
             except ValueError:  # a hand-edited file read_centres refuses: no form over it
                 centres = None
+        margin = self.gw.margin(month) if finance and self.gw.stripe_revenue_key else None
         page = dashboard.render(self.gw.ledger, self.gw.caps, f"{name} ({role})", can_decide, self.gw.in_shadow(),
-                                set(self.gw.key_agents.values()), month, finance, centres, version)
+                                set(self.gw.key_agents.values()), month, finance, centres, version, margin)
         self._relay(200, "text/html; charset=utf-8", page.encode(), HTML_HEADERS)
 
     def _month(self) -> str | None:
