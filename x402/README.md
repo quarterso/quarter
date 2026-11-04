@@ -48,6 +48,25 @@ Only USDC is approved, since Quarter counts in dollars: on Base, Ethereum, Polyg
 
 If the paid request itself throws (the network failed), x402 runs no hook, so the hold stays open and counts against caps until it is settled with `POST /settle`. x402 version 1 tells the client nothing after the payment, so a version 1 payment is settled in full as soon as it is signed. MCP tool calls carry no headers, but the mandate is in the payment's extensions, which MCP sends in `_meta["x402/payment"]`. The seller hook below checks HTTP requests only; an MCP seller reads the mandate with `mandateFrom` from `@quarterfi/spend-mandate`. A version 1 payment has no extensions and carries the mandate only in the header.
 
+## Cloudflare Agents SDK
+
+`withX402Client` from `agents/x402` asks a confirmation callback before each paid tool call. Make that callback Quarter:
+
+```js
+import { quarterOnPaymentRequired } from '@quarterfi/x402-spend-control/cloudflare-agents';
+
+const pay = quarterOnPaymentRequired({ url: 'http://quarter:8780', key: env.QUARTER_AGENT_KEY, agent: 'researcher', network: 'base' });
+const result = await this.x402Client.callTool(pay, { name, arguments: args });
+await pay.settle(result);
+```
+
+It takes the same options as `withQuarter`, plus `network` when you gave one to `withX402Client`. Make one callback per tool call.
+
+- The callback returns true when Quarter allows the payment. A cap, a pause, a denied approval, an approval not given within `wait`, or Quarter not answering returns false, and the tool call ends with "User declined payment". `onError` is told why.
+- The callback sees every way the tool can be paid, before the client picks one. It allows only when every exact EVM option the client could pick pays the same payee the same USDC amount.
+- `pay.settle(result)` records the payment: the transaction when the tool returned a receipt, 0 when the tool failed, so the seller did not settle. If `callTool` threw, call `pay.settle()`: it counts in full. Until it is settled, the hold counts against caps.
+- The callback cannot change the payment, so it carries no spend mandate.
+
 ## For sellers: check the mandate in x402's own hooks
 
 ```js

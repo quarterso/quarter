@@ -11,7 +11,9 @@ The customer's own settings always win: feed prices fill in models their price f
 set, over the built-in ones, and feed rules come after their own rules. A feed may only hold
 tool rules that ask a person (approve), never deny: Quarter can make a call wait, never stop
 one the customer allowed. Its HTTP rules (version 2) apply to calls none of the customer's
-rules matched. Each feed taken is audited with its version and hash, so the
+rules matched. Its payees (version 4) can send a payment to a person: one to a payee marked
+caution, or one far above the payee's listed price. A payee the feed does not list is not held.
+Each feed taken is audited with its version and hash, so the
 hash-chained record shows which rules were in force when.
 """
 
@@ -19,16 +21,22 @@ import hashlib
 import json
 import threading
 import urllib.request
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
+from fnmatch import fnmatchcase
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import ed25519
+from .money import MICROS, to_micros
+from .payments import caip2
 from .pricing import BUILT_IN, PriceBook
 from .rules import Rules, load_http_rules, load_rules
 
 DAY = 86_400
 MAX_BYTES = 1_000_000
+PAYEE_KEYS = {"id", "service", "pay_to", "hosts", "status", "prices", "why", "source"}
+PRICE_FACTOR = 10  # a payment over ten times a payee's listed price asks a person (FORMAT.md)
 
 
 def canonical(body: dict) -> bytes:
@@ -54,6 +62,77 @@ def verified(envelope: dict, public: str) -> dict | None:
         return None
 
 
+@dataclass(frozen=True)
+class Payee:
+    """A payee the feed lists: by x402 payTo address and network, or by resource host."""
+    id: str
+    service: str
+    status: str  # "known" or "caution"
+    why: str
+    pay_to: tuple[tuple[str, str], ...] = ()
+    hosts: tuple[str, ...] = ()
+    prices: tuple[tuple[str, str], ...] = ()  # (resource glob, max_usd)
+
+    def matches(self, address: str, network: str | None, host: str) -> bool:
+        def same(a, b):
+            return a.lower() == b.lower() if a.lower().startswith("0x") else a == b
+
+        by_address = address and any(same(address, a) and network in (None, n) for a, n in self.pay_to)
+        return bool(by_address or host and any(fnmatchcase(host, h.lower()) for h in self.hosts))
+
+    def flag(self, resource: str, amount: int) -> str | None:
+        """Why this payment waits for a person, or None."""
+        if self.status == "caution":
+            return f"feed payee {self.id}: {self.why}"
+        for pattern, max_usd in self.prices:
+            if fnmatchcase(resource, pattern) and amount > PRICE_FACTOR * to_micros(max_usd):
+                asked = format((Decimal(amount) / MICROS).normalize(), "f")
+                return (f"feed payee {self.id}: ${asked} is over {PRICE_FACTOR} times"
+                        f" the ${max_usd} {self.service} lists for {pattern}")
+        return None
+
+
+def load_payees(raw: list) -> list[Payee]:
+    """The feed's payees. One with a field or a status this version does not know is skipped.
+    Raises ValueError naming the first bad payee."""
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise ValueError("payees is a list")
+    payees = []
+    for item in raw:
+        name = item.get("id")
+        if set(item) - PAYEE_KEYS or item.get("status") not in ("known", "caution"):
+            continue
+        try:
+            hosts = item.get("hosts", [])
+            hosts = [hosts] if isinstance(hosts, str) else hosts
+            pay_to = tuple((str(t["address"]), caip2(str(t["network"]))) for t in item.get("pay_to", []))
+            prices = tuple((str(r["resource"]), str(Decimal(str(r["max_usd"])))) for r in item.get("prices", []))
+            if not isinstance(name, str) or not name or not item.get("why") or not (pay_to or hosts):
+                raise ValueError
+            if not all(isinstance(h, str) for h in hosts) or any(Decimal(m) <= 0 for _, m in prices):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, InvalidOperation):
+            raise ValueError(f"payee {name}: needs an id, a why, pay_to or hosts, and prices over 0") from None
+        payees.append(Payee(name, str(item.get("service") or name), item["status"], str(item["why"]),
+                            pay_to, tuple(hosts), prices))
+    return payees
+
+
+def payee_flags(payees: list[Payee], rail: str, payee: str, network: str | None, resource: str,
+                amount: int) -> str | None:
+    """Why the feed's payees send this payment to a person, or None. payee is an x402 payTo
+    only on rail x402; resource is the URL paid for, if the agent said."""
+    try:
+        parts = urlsplit(resource)
+        host = (parts.hostname or "").lower()
+    except ValueError:  # not a URL: the address alone decides
+        parts, host = urlsplit(""), ""
+    url = f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path}" if host else ""
+    address = payee if rail == "x402" else ""
+    reasons = [p.flag(url, amount) for p in payees if p.matches(address, caip2(network), host)]
+    return "; ".join(r for r in reasons if r) or None
+
+
 def checked(body: dict) -> tuple[dict, Rules]:
     """The feed's prices and rules, or ValueError: a version, prices that load, and only tool
     rules that ask a person."""
@@ -73,6 +152,7 @@ def checked(body: dict) -> tuple[dict, Rules]:
     if any(r.action != "approve" for r in rules.tools):
         raise ValueError("feed rules may only ask a person (approve), never deny")
     rules.feed_calls = load_http_rules(body.get("http") or [])
+    rules.feed_payees = load_payees(body.get("payees") or [])
     return prices, rules
 
 
@@ -133,7 +213,8 @@ class Feed:
             return False
         self.gw.prices = PriceBook.load(self.prices(prices))
         tools = [replace(r, origin="feed rule") for r in rules.tools]
-        self.gw.rules = replace(self.own_rules, tools=[*self.own_rules.tools, *tools], feed_calls=rules.feed_calls)
+        self.gw.rules = replace(self.own_rules, tools=[*self.own_rules.tools, *tools], feed_calls=rules.feed_calls,
+                                feed_payees=rules.feed_payees)
         self.version = body["version"]
         if keep and self.kept:
             spare = self.kept.with_suffix(".tmp")
@@ -141,7 +222,7 @@ class Feed:
             spare.replace(self.kept)
         detail = {"version": body["version"], "issued": body.get("issued"), "sha256": hashlib.sha256(raw).hexdigest(),
                   "prices": sum(len(m) for m in prices.values()), "rules": len(tools),
-                  "http_rules": len(rules.feed_calls)}
+                  "http_rules": len(rules.feed_calls), "payees": len(rules.feed_payees)}
         self.gw.ledger.audit("feed_applied", None, json.dumps(detail, sort_keys=True))
         return True
 

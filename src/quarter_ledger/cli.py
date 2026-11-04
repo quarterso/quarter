@@ -509,7 +509,8 @@ def run_feed_sign(args, ledger):
 
 
 def run_report(args, ledger):
-    rows = [(w or "(none)", v, t) for w, v, t in ledger.totals(args.by)]
+    since, until = month_range(args.month) if args.month else (None, None)
+    rows = [(w or "(none)", v, t) for w, v, t in ledger.totals(args.by, since, until)]
     if args.csv:
         writer = csv.writer(sys.stdout)
         writer.writerow([args.by, "vendor", "usd"])
@@ -851,6 +852,7 @@ def run_decide(args, ledger):
         sys.exit(str(e))
     if ok:  # as the gateway does, so the decision is in the chain
         ledger.audit(args.command, f"{args.by}@cli", args.id)
+        print(f"{args.id} {'approved' if args.command == 'approve' else 'denied'} by {args.by}")
     slack = Slack.from_env(os.environ)
     if ok and slack:  # no gateway runs here, so update its Slack message directly
         try:
@@ -1410,6 +1412,7 @@ def parser() -> argparse.ArgumentParser:
     r = command("report", run_report, "spend so far")
     r.add_argument("--by", choices=["agent", "task", "customer", "vendor"], default="customer")
     r.add_argument("--csv", action="store_true")
+    r.add_argument("--month", help="YYYY-MM, otherwise all time")
 
     month(command("summary", run_summary, "per agent: spent by it and spent on it"))
 

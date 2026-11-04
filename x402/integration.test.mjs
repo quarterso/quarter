@@ -63,7 +63,9 @@ test('the real x402 client pays with Quarter\'s approval and the seller accepts 
     const res = await pay(shop.url);
     assert.equal(res.status, 200);
     assert.ok(shop.paid[0]['spend-mandate'] && shop.paid[0]['payment-signature']);
-    assert.deepEqual(quarter.seen[0].body, { rail: 'x402', payee: PAYEE, amount_micros: 250000 });
+    assert.deepEqual(quarter.seen[0].body, {
+      rail: 'x402', payee: PAYEE, amount_micros: 250000, network: 'eip155:8453', resource: 'https://api.example.com/data',
+    });
     const [settle] = quarter.settles();
     assert.deepEqual([settle.call_id, settle.amount_micros, settle.tx], ['c1', 250000, '0xabc']);
   } finally {

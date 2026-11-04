@@ -380,6 +380,10 @@ def test_connect_command(tmp_path, capsys, monkeypatch):
     assert "0 new, 0 revised, 1 already booked" in capsys.readouterr().out
     main(["--db", db, "report", "--by", "agent"])
     assert "bot" in capsys.readouterr().out
+    main(["--db", db, "report", "--by", "agent", "--month", "2026-10"])
+    assert "bot" in capsys.readouterr().out
+    main(["--db", db, "report", "--by", "agent", "--month", "2026-09"])
+    assert "bot" not in capsys.readouterr().out
     main(["--db", db, "agents", "list"])
     assert "bot" in capsys.readouterr().out
     with pytest.raises(SystemExit, match="set QUARTER_LITELLM_URL"):

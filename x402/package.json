@@ -13,9 +13,13 @@
     "./seller": {
       "types": "./seller.d.ts",
       "default": "./seller.mjs"
+    },
+    "./cloudflare-agents": {
+      "types": "./cloudflare-agents.d.ts",
+      "default": "./cloudflare-agents.mjs"
     }
   },
-  "files": ["index.mjs", "index.d.ts", "seller.mjs", "seller.d.ts", "README.md", "LICENSE"],
+  "files": ["index.mjs", "index.d.ts", "quarter.mjs", "seller.mjs", "seller.d.ts", "cloudflare-agents.mjs", "cloudflare-agents.d.ts", "README.md", "LICENSE"],
   "engines": { "node": ">=18" },
   "scripts": { "test": "node --test" },
   "peerDependencies": {
@@ -27,11 +31,13 @@
   },
   "devDependencies": {
     "@x402/core": "2.29.0",
+    "@x402/evm": "2.29.0",
     "@x402/fetch": "2.29.0",
-    "@quarterfi/spend-mandate": "file:../sellers"
+    "@quarterfi/spend-mandate": "file:../sellers",
+    "agents": "0.32.0"
   },
   "publishConfig": { "access": "public" },
-  "keywords": ["x402", "ai-agents", "agent-payments", "spend-control", "spend-mandate", "approvals"],
+  "keywords": ["x402", "ai-agents", "agent-payments", "spend-control", "cloudflare-agents", "spend-mandate", "approvals"],
   "homepage": "https://quarterfi.com/spend-mandates",
   "license": "Apache-2.0"
 }

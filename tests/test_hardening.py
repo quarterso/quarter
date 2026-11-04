@@ -471,3 +471,15 @@ def test_connections_past_the_limit_are_closed_at_once(tmp_path, monkeypatch):
     time.sleep(0.2)
     assert urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/healthz").status == 200
     server.shutdown()
+
+
+def test_cli_approve_says_who_decided(tmp_path, capsys, monkeypatch):
+    db = str(tmp_path / "l.db")
+    ledger = Ledger(db)
+    caps = [Cap("agent", "*", "day", to_micros(1), approve_above=to_micros("0.10"))]
+    _, apr = ledger.hold(caps, {"agent": "a1", "task": None, "customer": None}, "fake", "m", to_micros("0.5"))
+    monkeypatch.delenv("QUARTER_SLACK_BOT_TOKEN", raising=False)
+    with pytest.raises(SystemExit) as done:
+        cli.main(["--db", db, "approve", apr, "--as", "Ann"])
+    assert done.value.code == 0
+    assert capsys.readouterr().out.strip() == f"{apr} approved by Ann"

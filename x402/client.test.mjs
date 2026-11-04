@@ -19,7 +19,9 @@ test('an approved payment carries the mandate and is settled with its transactio
     assert.deepEqual(headers, { 'PAYMENT-SIGNATURE': 'encoded', 'Spend-Mandate': 'm.a.ndate' });
     const [authorize] = quarter.seen;
     assert.equal(authorize.path, '/authorize');
-    assert.deepEqual(authorize.body, { rail: 'x402', payee: PAYEE, amount_micros: 250000 });
+    assert.deepEqual(authorize.body, {
+      rail: 'x402', payee: PAYEE, amount_micros: 250000, network: 'eip155:8453', resource: 'https://api.example.com/data',
+    });
     assert.equal(authorize.headers['x-quarter-key'], 'qk_agent');
     assert.equal(authorize.headers['x-quarter-agent'], 'researcher');
     assert.equal(authorize.headers['x-quarter-task'], 't1');

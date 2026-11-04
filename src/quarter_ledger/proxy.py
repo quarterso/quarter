@@ -87,6 +87,7 @@ from . import (
 from .evidence import audit_pack
 from .export import FORMATS, centre_headers, focus, focus_rows, journal, read_centres
 from .failopen import FailOpenLog
+from .feed import payee_flags
 from .insights import forecast
 from .money import MAX_AMOUNT, to_micros, usd_display
 from .payments import AUTH_TTL, RAILS, authorisation, payee_rule, x402_settlement
@@ -1339,7 +1340,10 @@ class Handler(BaseHTTPRequestHandler):
         wait = self._wait()
         if wait is None:
             return None
-        ask = f"{payee} is not on the {rail} payee list" if rule == "ask" else None
+        unlisted = f"{payee} is not on the {rail} payee list" if rule == "ask" else None
+        network, resource = body.get("network"), str(body.get("resource") or "")
+        flagged = payee_flags(gw.rules.feed_payees, rail, payee, network and str(network), resource, amount)
+        ask = "; ".join(r for r in (unlisted, flagged) if r) or None
         deny = f"{payee} is not allowed on the {rail} payee list" if rule == "deny" else None
         used = self.headers.get("x-quarter-approval")
         args = (gw.caps, ids, f"{rail}:{payee}", rail, amount)

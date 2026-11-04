@@ -4,9 +4,9 @@ from typing import ClassVar
 
 import pytest
 from test_egress import VOLUME_DELETE, FakeApi, as_agent
-from test_proxy import PRICES, call, start
+from test_proxy import ADMIN_KEY, AGENT_KEY, HEADERS, PRICES, call, start
 
-from quarter_ledger.feed import Feed, checked, sign_feed, verified
+from quarter_ledger.feed import Feed, checked, load_payees, payee_flags, sign_feed, verified
 from quarter_ledger.money import to_micros
 from quarter_ledger.proxy import Gateway, serve
 from quarter_ledger.receipts import public_key
@@ -212,3 +212,69 @@ def test_a_version_3_feed_with_mcp_ratings_is_taken_and_the_ratings_ignored(tmp_
     assert feed.version == 3
     assert gw.rules.listed() == ["feed rule 1: approve tool Bash command drop\\s+database",
                                  "feed rule github.repo: approve, deletes a GitHub repository"]
+
+
+PAY_TO = "0x6d6E695b09861467c7d462f5AAF31cF3540B9192"
+SEARCH = "https://api.exa.ai/search"
+PAYEES = [
+    {"id": "x402.exa", "service": "Exa", "status": "known",
+     "pay_to": [{"address": PAY_TO, "network": "eip155:8453"}, {"address": "12Ec2cJm", "network": "solana"}],
+     "prices": [{"resource": SEARCH, "max_usd": "0.007"}],
+     "why": "listed in the x402 Bazaar", "source": "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources"},
+    {"id": "x402.drainer", "service": "Drainer", "status": "caution", "hosts": ["*.drain.example"],
+     "why": "a public report says it asked agents for their whole balance", "source": "https://report.example/1"},
+]
+
+
+def flags(payee, amount_usd, network="eip155:8453", resource=SEARCH, rail="x402"):
+    return payee_flags(load_payees(PAYEES), rail, payee, network, resource, to_micros(amount_usd))
+
+
+def test_a_listed_payee_asks_only_when_cautioned_or_far_over_its_price():
+    assert flags(PAY_TO.lower(), "0.07") is None  # ten times the listed price is still normal
+    assert flags(PAY_TO, "0.0701") == "feed payee x402.exa: $0.0701 is over 10 times the $0.007 Exa lists for " + SEARCH
+    assert flags(PAY_TO, "5", resource="https://api.exa.ai/answer") is None  # no price for that resource
+    assert flags(PAY_TO, "5", network="eip155:137") is None  # the same address elsewhere is someone else
+    assert flags(PAY_TO, "5", network=None)  # a payment that names no network matches the address
+    assert flags("12Ec2cJm", "5", network="solana")  # x402 v1 network names are read as CAIP-2
+    assert flags("12EC2CJM", "5", network="solana") is None  # Solana addresses are case-sensitive
+    assert flags(PAY_TO, "5", rail="card") is None  # an address is an x402 payTo only
+    assert flags("0xNobody", "500") is None  # a payee no one lists is not suspect
+    why = "feed payee x402.drainer: a public report says it asked agents for their whole balance"
+    assert flags("0xNobody", "0.01", resource="https://api.drain.example/x?y=1") == why
+    assert flags("0xNobody", "0.01", resource="https://drain.example.org/") is None
+    assert flags(PAY_TO, "5", resource="http://[nonsense") is None  # an unreadable resource has no price
+
+
+def test_a_payee_this_version_cannot_read_is_skipped_and_a_broken_one_refused():
+    newer = [{**PAYEES[1], "since": "2026"}, {**PAYEES[1], "status": "block"}]
+    assert load_payees(newer) == []
+    for bad in ({**PAYEES[1], "why": ""}, {**PAYEES[1], "hosts": []},
+                {**PAYEES[0], "prices": [{"resource": SEARCH, "max_usd": "free"}]}):
+        with pytest.raises(ValueError, match="payee"):
+            checked({**body(version=4), "payees": [bad]})
+
+
+def test_feed_payees_send_a_payment_to_a_person_with_the_reason(tmp_path):
+    ledger = Ledger(str(tmp_path / "l.db"))
+    gw = Gateway(ledger, [], PRICES, {}, {AGENT_KEY}, ADMIN_KEY, signing_key="s" * 32)
+    feed = Feed(gw, "https://feed.example/feed.json", PUBLIC, None, gw.rules)
+    assert feed.take(json.dumps(sign_feed({**body(version=4), "payees": PAYEES}, KEY)).encode())
+    applied = ledger.db.execute("select detail from audit where action = 'feed_applied'").fetchone()[0]
+    assert json.loads(applied)["payees"] == 2
+    server = start(serve(gw, port=0))
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/authorize"
+        pay = {"rail": "x402", "payee": PAY_TO, "network": "eip155:8453", "resource": SEARCH}
+        assert call(url, {**pay, "amount_usd": "0.007"}, HEADERS)[0] == 200
+        assert call(url, {**pay, "payee": "0xNobody", "amount_usd": "3"}, HEADERS)[0] == 200
+        status, reply = call(url, {**pay, "amount_usd": "3"}, HEADERS)
+        reply = json.loads(reply)
+        assert status == 403 and reply["error"] == "approval_required"
+        assert reply["reason"].startswith("feed payee x402.exa: $3 is over 10 times")
+        status, reply = call(url, {**pay, "resource": "https://api.drain.example/pay", "amount_usd": "0.01"}, HEADERS)
+        assert status == 403 and "asked agents for their whole balance" in json.loads(reply)["reason"]
+        reasons = [a["reason"] for a in ledger.approvals()]
+        assert len(reasons) == 2 and all(r.startswith("feed payee ") for r in reasons)
+    finally:
+        server.shutdown()

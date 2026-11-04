@@ -183,6 +183,7 @@ class Rules:
     routes: list[Route] = field(default_factory=list)
     redactions: list[Redaction] = field(default_factory=list)
     feed_calls: list[HttpRule] = field(default_factory=list)  # from the feed, after all of the above
+    feed_payees: list = field(default_factory=list)  # feed.Payee: payees the feed lists (version 4)
 
     def redactor(self, agent: str, customer: str | None, upstream: str, key: bytes) -> Redactor | None:
         """What to mask in this call, from every redaction that matches, or None."""
