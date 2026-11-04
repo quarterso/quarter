@@ -1,0 +1,13 @@
+<?xml version="1.0" standalone="yes"?>
+<sdnList xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML">
+  <publshInformation>
+    <Publish_Date>10/19/2026</Publish_Date>
+    <Record_Count>1</Record_Count>
+  </publshInformation>
+  <sdnEntry>
+    <uid>30947</uid>
+    <lastName>HUAWEI TECHNOLOGIES CO., LTD.</lastName>
+    <sdnType>Entity</sdnType>
+    <programList><program>CMIC-EO13959</program></programList>
+  </sdnEntry>
+</sdnList>

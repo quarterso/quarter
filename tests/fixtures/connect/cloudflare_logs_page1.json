@@ -1,0 +1,4 @@
+{"success": true, "errors": [], "messages": [], "result": [
+  {"id": "01JBXYZ0000000000000000001", "created_at": "2026-10-12T11:00:00Z", "provider": "openai", "model": "gpt-4o-mini", "path": "chat/completions", "cost": 0.002, "tokens_in": 900, "tokens_out": 100, "success": true, "cached": false, "duration": 812, "status_code": 200, "metadata": "{\"agent\":\"sales-bot\",\"customer_id\":\"acme\",\"task\":\"lead-77\"}"},
+  {"id": "01JBXYZ0000000000000000002", "created_at": "2026-10-12T11:05:00Z", "provider": "anthropic", "model": "claude-haiku-4-5", "path": "v1/messages", "cost": 0.01, "tokens_in": 2000, "tokens_out": 400, "success": true, "cached": false, "duration": 1500, "status_code": 200}
+], "result_info": {"page": 1, "per_page": 2, "count": 2, "total_count": 3}}

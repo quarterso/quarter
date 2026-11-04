@@ -1,0 +1,40 @@
+<?xml version="1.0" standalone="yes"?>
+<sdnList xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML">
+  <publshInformation>
+    <Publish_Date>10/28/2026</Publish_Date>
+    <Record_Count>4</Record_Count>
+  </publshInformation>
+  <sdnEntry>
+    <uid>306</uid>
+    <lastName>BANCO NACIONAL DE CUBA</lastName>
+    <sdnType>Entity</sdnType>
+    <programList><program>CUBA</program></programList>
+    <akaList>
+      <aka><uid>219</uid><type>a.k.a.</type><category>weak</category><lastName>BNC</lastName></aka>
+      <aka><uid>220</uid><type>a.k.a.</type><category>strong</category><lastName>NATIONAL BANK OF CUBA</lastName></aka>
+    </akaList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>6924</uid>
+    <firstName>Hassan</firstName>
+    <lastName>ALI</lastName>
+    <sdnType>Individual</sdnType>
+    <programList><program>SDGT</program></programList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>24003</uid>
+    <lastName>SUEX OTC, S.R.O.</lastName>
+    <sdnType>Entity</sdnType>
+    <programList><program>CYBER2</program></programList>
+    <idList>
+      <id><uid>1</uid><idType>Digital Currency Address - ETH</idType><idNumber>0xAbC0000000000000000000000000000000000001</idNumber></id>
+      <id><uid>2</uid><idType>Digital Currency Address - XBT</idType><idNumber>1FakeXbtAddressForTests1111111</idNumber></id>
+    </idList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>9001</uid>
+    <lastName>NORTHERN STAR</lastName>
+    <sdnType>Vessel</sdnType>
+    <programList><program>IRAN</program></programList>
+  </sdnEntry>
+</sdnList>

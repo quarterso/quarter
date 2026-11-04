@@ -1,0 +1,3 @@
+{"data": [
+  {"request_id": "chatcmpl-113", "call_type": "acompletion", "spend": 0.25, "total_tokens": 100, "prompt_tokens": 60, "completion_tokens": 40, "startTime": "2026-10-12 23:59:00", "model": "gpt-4o-mini", "custom_llm_provider": "openai", "user": "u-42", "end_user": "acme", "request_tags": [], "session_id": "sess-7", "metadata": {"user_api_key_alias": "support-bot"}}
+], "total": 3, "page": 2, "page_size": 2, "total_pages": 2}

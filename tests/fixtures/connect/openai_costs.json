@@ -1,0 +1,10 @@
+{"object": "page", "has_more": false, "next_page": null, "data": [
+  {"object": "bucket", "start_time": 1791763200, "end_time": 1791849600, "results": [
+    {"object": "organization.costs.result", "amount": {"value": 1.5, "currency": "usd"}, "line_item": "gpt-4o-2024-08-06, input", "project_id": "proj_support"},
+    {"object": "organization.costs.result", "amount": {"value": 2.5, "currency": "usd"}, "line_item": "gpt-4o-2024-08-06, output", "project_id": "proj_support"},
+    {"object": "organization.costs.result", "amount": {"value": 1.0, "currency": "usd"}, "line_item": "gpt-4o-2024-08-06, input", "project_id": "proj_research"}
+  ]},
+  {"object": "bucket", "start_time": 1791849600, "end_time": 1791936000, "results": [
+    {"object": "organization.costs.result", "amount": {"value": 0.25, "currency": "usd"}, "line_item": "o3, input", "project_id": null}
+  ]}
+]}

@@ -1,0 +1,9 @@
+{
+  "domain": "quarterfi.com",
+  "tunnel": "00000000-0000-0000-0000-000000000000",
+  "ipv6_only": true,
+  "tenants": [
+    {"name": "sandbox", "tag": "e7ef488", "sandbox": true},
+    {"name": "acme", "tag": "e7ef488"}
+  ]
+}

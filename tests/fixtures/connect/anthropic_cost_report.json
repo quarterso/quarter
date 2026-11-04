@@ -1,0 +1,6 @@
+{"has_more": false, "next_page": null, "data": [
+  {"starting_at": "2026-10-12T00:00:00Z", "ending_at": "2026-10-13T00:00:00Z", "results": [
+    {"amount": "300", "currency": "USD", "description": "Claude Opus 5.5 Usage - Input Tokens", "model": "claude-opus-5-5", "cost_type": "tokens", "workspace_id": "wrkspc_eng"},
+    {"amount": "100", "currency": "USD", "description": "Claude Opus 5.5 Usage - Output Tokens", "model": "claude-opus-5-5", "cost_type": "tokens", "workspace_id": null}
+  ]}
+]}

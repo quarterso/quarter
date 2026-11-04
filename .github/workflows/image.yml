@@ -1,0 +1,26 @@
+# On a version tag in the public repo, build the gateway image and push it to GitHub's registry.
+name: image
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+  packages: write
+jobs:
+  image:
+    if: github.repository == 'quarterso/quarter'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/quarterso/quarter:${{ github.ref_name }}
+            ghcr.io/quarterso/quarter:latest

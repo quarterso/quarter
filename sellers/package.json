@@ -1,0 +1,21 @@
+{
+  "name": "@quarterfi/spend-mandate",
+  "version": "0.1.0",
+  "description": "Check a spend mandate: proof that a company's spend policy allowed an AI agent to pay you. No dependencies.",
+  "type": "module",
+  "main": "./verify-spend-mandate.mjs",
+  "types": "./verify-spend-mandate.d.ts",
+  "exports": {
+    ".": {
+      "types": "./verify-spend-mandate.d.ts",
+      "default": "./verify-spend-mandate.mjs"
+    }
+  },
+  "files": ["verify-spend-mandate.mjs", "verify-spend-mandate.d.ts", "test-vectors.json", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test" },
+  "publishConfig": { "access": "public" },
+  "keywords": ["ai-agents", "agent-payments", "x402", "spend-mandate", "jwt", "ed25519", "payments"],
+  "homepage": "https://quarterfi.com/spend-mandates",
+  "license": "Apache-2.0"
+}

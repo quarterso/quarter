@@ -1,0 +1,5 @@
+[
+  {"scope": "agent", "key": "*", "window": "day", "limit_usd": "50", "approve_above_usd": "2"},
+  {"scope": "customer", "key": "acme", "window": "month", "limit_usd": "300"},
+  {"scope": "agent", "key": "voice-receptionist", "window": "day", "limit_usd": "20"}
+]

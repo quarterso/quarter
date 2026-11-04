@@ -1,0 +1,37 @@
+{
+  "name": "@quarterfi/x402-spend-control",
+  "version": "0.1.0",
+  "description": "Quarter's spend approval inside the official x402 client: every x402 payment is authorised, carries a spend mandate and is settled in your ledger.",
+  "type": "module",
+  "main": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.mjs"
+    },
+    "./seller": {
+      "types": "./seller.d.ts",
+      "default": "./seller.mjs"
+    }
+  },
+  "files": ["index.mjs", "index.d.ts", "seller.mjs", "seller.d.ts", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test" },
+  "peerDependencies": {
+    "@x402/core": "^2.29.0",
+    "@quarterfi/spend-mandate": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@quarterfi/spend-mandate": { "optional": true }
+  },
+  "devDependencies": {
+    "@x402/core": "2.29.0",
+    "@x402/fetch": "2.29.0",
+    "@quarterfi/spend-mandate": "file:../sellers"
+  },
+  "publishConfig": { "access": "public" },
+  "keywords": ["x402", "ai-agents", "agent-payments", "spend-control", "spend-mandate", "approvals"],
+  "homepage": "https://quarterfi.com/spend-mandates",
+  "license": "Apache-2.0"
+}

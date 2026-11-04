@@ -1,0 +1,7 @@
+request_id,startTime,model,custom_llm_provider,spend,user,end_user,session_id,prompt_tokens,completion_tokens
+llm-0001,2026-10-03T09:12:00Z,gpt-4o,openai,6.40,billing-agent,acme,inv-1001,1820000,184000
+llm-0002,2026-10-06T14:40:00Z,claude-sonnet-4-5,anthropic,9.15,billing-agent,acme,inv-1002,1510000,308000
+llm-0003,2026-10-09T11:05:00Z,gpt-4o-mini,openai,0.42,billing-agent,globex,inv-1003,1400000,350000
+llm-0004,2026-10-14T16:22:00Z,claude-sonnet-4-5,anthropic,12.30,billing-agent,globex,inv-1004,2100000,400000
+llm-0005,2026-10-20T08:47:00Z,gpt-4o,openai,7.88,billing-agent,acme,inv-1005,2280000,218000
+llm-0006,2026-10-27T13:30:00Z,claude-haiku-4-5,anthropic,11.40,billing-agent,globex,inv-1006,6400000,1000000
