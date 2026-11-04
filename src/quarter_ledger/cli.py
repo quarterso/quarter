@@ -1,6 +1,7 @@
 """quarter-ledger serve | status | mcp | why | report | summary | approvals [import | export | verify]
 | approve | deny | cost | export
-| shadow-report | replay | agents | ingest-fail-open | connect | sanctions [update | check].
+| shadow-report | replay | agents | ingest-fail-open | connect
+| sanctions [update | check | cleared | forget].
 
 Keys come from the environment, never from files in the repository:
   QUARTER_AGENT_KEYS  comma-separated agent keys, each `key` or `name=key` (names the agent)
@@ -63,6 +64,8 @@ anthropic, gemini and openrouter are built in; these files extend or override th
                       <db>.sanctions); with lists there, every payee is screened (sanctions.py)
   QUARTER_SANCTIONS_STALE_DAYS  days after a download that the lists count as stale, 7 unless
                       set: then new payees wait for a person, payees paid before go on
+  QUARTER_FREE_DECISIONS  decisions a UTC month includes (hosted free tier); past them every
+                      call is still decided and its reply says x-quarter-free-limit: exceeded
   QUARTER_DB, HOST, PORT
 """
 
@@ -194,6 +197,15 @@ def retention_days(value: str | None) -> int | None:
         return None
     if not value.strip().isdigit() or int(value) < 1:
         sys.exit("QUARTER_RETENTION_DAYS must be a whole number of days")
+    return int(value)
+
+
+def free_decisions(value: str | None) -> int | None:
+    """QUARTER_FREE_DECISIONS as a whole number of decisions a month, or None when unset."""
+    if not value:
+        return None
+    if not value.strip().isdigit():
+        sys.exit("QUARTER_FREE_DECISIONS must be a whole number of decisions")
     return int(value)
 
 
@@ -396,7 +408,8 @@ def run_serve(args, ledger):
         settings["people"] = roles(people)
     ledger.record_config(settings | {
         env: os.environ[f"QUARTER_{env.upper()}"]
-        for env in ("runaway", "payees", "retention_days", "mode", "register", "max_wait", "fail_open")
+        for env in ("runaway", "payees", "retention_days", "mode", "register", "max_wait", "fail_open",
+                    "free_decisions")
         if os.environ.get(f"QUARTER_{env.upper()}")
     })
     ledger.register = register_from(os.environ.get("QUARTER_REGISTER"))
@@ -440,6 +453,9 @@ def run_serve(args, ledger):
         print(f"SHADOW MODE: {rule} let every call through and only record what they would have held"
               " (quarter-ledger shadow-report)", flush=True)
     print(gw.sanctions.summary(), flush=True)
+    if ledger.free_decisions is not None:
+        print(f"free tier: {ledger.free_decisions} decisions a month, then replies say x-quarter-free-limit: exceeded",
+              flush=True)
     if gw.fail_open:
         print(f"FAIL-OPEN: if the ledger cannot be written, plain model calls go through, logged to"
               f" {gw.fail_open.path} (quarter-ledger ingest-fail-open)", flush=True)
@@ -675,6 +691,17 @@ def run_sanctions(args, ledger):
             ledger.audit("sanctions_update", getpass.getuser(), json.dumps({"list": which} | info, sort_keys=True))
             print(f"{which}: published {info['published']}, {info['records']} records, sha256 {info['sha256'][:16]}")
         print(f"kept in {screen.folder}")
+        for c in screen.expire(ledger, getpass.getuser()):
+            print(f"{c['payee']}: no longer cleared, {c['list']} entry {c['uid']} changed or left the list")
+        return
+    if args.sanctions_command == "cleared":
+        for c in sanctions.cleared(ledger):
+            print(f"{c['payee']}  {c['list']} entry {c['uid']}  cleared by {c['cleared_by']}"
+                  f" {c['cleared_at'][:16]} ({c['approval_id']})")
+        return
+    if args.sanctions_command == "forget":
+        gone = sanctions.forget(ledger, args.name, getpass.getuser())
+        print(f"{args.name}: {'forgotten, its next payment waits for a person' if gone else 'not cleared'}")
         return
     if not screen.stored():
         sys.exit(f"no OFAC list in {screen.folder}: run quarter-ledger sanctions update")
@@ -1555,6 +1582,8 @@ def parser() -> argparse.ArgumentParser:
     scsub.add_parser("update", help="download the SDN and Consolidated lists from OFAC and keep them")
     scsub.add_parser("check", help="screen one name or wallet address, as a payment would be"
                      ).add_argument("name")
+    scsub.add_parser("cleared", help="payees a person cleared of a close match, and by whom")
+    scsub.add_parser("forget", help="hold a cleared payee for a person again").add_argument("name")
     an = command("anchor", run_anchor,
                  "record both chain heads in the audit log and a JSON file to keep elsewhere")
     an.add_argument("--out", help="path of the anchor JSON to write")
@@ -1679,4 +1708,6 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(f"no ledger at {args.db}")  # opening it would make an empty one, which checks out
     if args.command == "demo":  # it makes its own folder and ledger
         return args.run(args)
-    args.run(args, Ledger(args.db))
+    ledger = Ledger(args.db)
+    ledger.free_decisions = free_decisions(os.environ.get("QUARTER_FREE_DECISIONS"))
+    args.run(args, ledger)

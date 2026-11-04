@@ -26,7 +26,9 @@ CLOUDFLARED = ("cloudflare/cloudflared:2026.10.7"
                "@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba")
 LITESTREAM = ("litestream/litestream:0.5.17"
               "@sha256:4b02b9859a6b6b4087d8b8944e15f7e984bd7957cba322bbeee38b0e27b9656a")
-# The gateway takes plain http only on localhost, so the mock shares the sandbox's network.
+# The gateway takes plain http only on localhost, so the sandbox joins its mock's network
+# namespace. Not the other way round: a container that joins another loses its network when the
+# other restarts, and the gateway is the one that may restart (out of memory, a new image).
 MOCK_URL = "http://127.0.0.1:8790"
 # The sandbox talks only to its mock, so no vendor key is on the box, and its caps stay small.
 SANDBOX_ENV = {
@@ -110,7 +112,7 @@ def compose(box: dict) -> str:
             *(f"      {k}: {q(v)}" for k, v in environment.items()),
             f"    volumes: [{name}:/data]",
             f"    mem_limit: {t['memory']}",
-            f"    networks: [{own[name]}]",
+            f'    network_mode: "service:{name}-mock"' if t["sandbox"] else f"    networks: [{own[name]}]",
         ]
         if t["sandbox"]:
             out += [
@@ -122,7 +124,7 @@ def compose(box: dict) -> str:
                 '    environment: {PORT: "8790"}',
                 "    volumes: [./mock_upstream.py:/mock/mock_upstream.py:ro]",
                 "    mem_limit: 32m",
-                f'    network_mode: "service:{name}"',
+                f"    networks: {{{own[name]}: {{aliases: [{name}]}}}}",  # Caddy reaches the gateway as {name}
             ]
     backed_up = [t["name"] for t in box["tenants"] if not t["sandbox"]]
     if backed_up:  # started after the tenants, so each volume is first made by its own ledger

@@ -11,6 +11,9 @@ alone is not proof (Hassan Ali is on the SDN list and is a common name), nor is 
 match or the Consolidated list, whose programs mostly restrict rather than block. Weak
 aliases are left out, as OFAC's FAQ 124 allows.
 
+A named person who approves a payment held only for a close match clears that payee for
+that entry. It is not held for it again until the entry changes or leaves the list.
+
 This is a screening aid, not a compliance program: see the README for what it misses.
 """
 
@@ -26,6 +29,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
+
+from .store import dicts
 
 SERVICE = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports"
 LISTS = {"sdn": f"{SERVICE}/SDN.XML", "consolidated": f"{SERVICE}/CONSOLIDATED.XML"}
@@ -63,6 +68,7 @@ class Match:
     matched: str = ""  # the name or address that matched
     programs: str = ""
     score: float = 0.0
+    entry: str = ""  # the entry's fingerprint: it changes when OFAC changes the entry
 
     @property
     def refused(self) -> bool:
@@ -73,6 +79,10 @@ class Match:
         what = "OFAC SDN list" if self.list == "sdn" else "OFAC Consolidated list"
         also = f" as {self.matched}" if self.matched != self.name else ""
         return f"{what} entry {self.uid} {self.name}{also} ({self.programs}), score {self.score:.2f}"
+
+
+def fingerprint(entry: dict) -> str:
+    return hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def _text(el, tag: str) -> str:
@@ -199,13 +209,14 @@ class Screen:
         e = addresses.get(address_key(payee))
         if e:
             return Match("match", e["list"], "address", e["uid"], e["names"][0], payee.strip(),
-                         e["programs"], 1.0)
+                         e["programs"], 1.0, fingerprint(e))
         key = " ".join(words(payee))
         if not key:
             return Match("clear")
         if key in exact:  # SDN before Consolidated, an entity before a person
             e, name = min(exact[key], key=lambda m: (m[0]["list"] != "sdn", m[0]["type"] == "Individual"))
-            return Match("match", e["list"], e["type"], e["uid"], e["names"][0], name, e["programs"], 1.0)
+            return Match("match", e["list"], e["type"], e["uid"], e["names"][0], name, e["programs"], 1.0,
+                         fingerprint(e))
         best, best_score = None, CLOSE
         for i in set().union(*(by_word.get(w, ()) for w in key.split())):
             other, e, name = names[i]
@@ -218,32 +229,73 @@ class Screen:
             return Match("clear")
         e, name = best
         return Match("close", e["list"], e["type"], e["uid"], e["names"][0], name, e["programs"],
-                     round(best_score, 3))
+                     round(best_score, 3), fingerprint(e))
 
-    def review(self, ledger, rail: str, payee: str, known) -> tuple[str | None, str | None]:
+    def review(self, ledger, rail: str, payee: str, known, approval: dict | None = None
+               ) -> tuple[str | None, str | None]:
         """(refuse, ask) for one payment: a reason to refuse it, or one a person must clear.
         Writes the screen to the audit log either way. known() says whether Quarter has
-        paid this payee before or it is on the payee list; asked only of a stale list."""
+        paid this payee before or it is on the payee list; asked only of a stale list.
+        approval is the one the payment carries, decided by a named person."""
         lists = self.stored()
         if not lists:
             return None, None
         m = self.check(payee)
         stale = self.stale()
         refuse = ask = None
+        held = f"{payee} may be sanctioned: {m.describe()}; check before paying"
+        cleared = m.outcome == "close" and self._cleared(ledger, rail, payee, m, held, approval)
         if m.refused:
             refuse = f"{payee} matches the {m.describe()}"
-        elif m.outcome != "clear":
-            ask = f"{payee} may be sanctioned: {m.describe()}; check before paying"
-        elif stale and not known():
+        elif m.outcome != "clear" and not cleared:
+            ask = held
+        elif stale and not known() and not cleared:
             ask = (f"the OFAC lists were last downloaded {self.age_days()} days ago and {payee}"
                    " is a new payee; check it, then run quarter-ledger sanctions update")
         ledger.audit("sanctions_screen", None, json.dumps({
-            "rail": rail, "payee": payee, "outcome": "refused" if refuse else "held" if ask else "clear",
+            "rail": rail, "payee": payee,
+            "outcome": "refused" if refuse else "held" if ask else "cleared" if cleared else "clear",
             "match": m.outcome, "list": m.list, "uid": m.uid, "name": m.matched, "score": m.score,
             "published": {w: i["published"] for w, i in lists.items()},
             "sha256": {w: i["sha256"][:16] for w, i in lists.items()}, "stale": stale,
         }, sort_keys=True))
         return refuse, ask
+
+    def _cleared(self, ledger, rail: str, payee: str, m: Match, held: str, approval: dict | None) -> bool:
+        """Whether a person cleared this payee of this close match: before, for the entry as
+        it stands, or now, by approving a payment held for this match alone (held)."""
+        key = " ".join(words(payee))
+        row = ledger.db.execute(
+            "select entry from sanctions_cleared where payee = ? and list = ? and uid = ?", (key, m.list, m.uid)
+        ).fetchone()
+        if row and row[0] == m.entry:
+            return True
+        if not (approval and approval["status"] == "approved" and approval["decided_by"]
+                and approval["vendor"] == f"{rail}:{payee}"
+                and approval["reason"] == held):
+            return False
+        with ledger._write():
+            ledger.db.execute(
+                "insert or replace into sanctions_cleared (payee, list, uid, entry, cleared_at, cleared_by,"
+                " approval_id) values (?, ?, ?, ?, ?, ?, ?)",
+                (key, m.list, m.uid, m.entry, datetime.now(UTC).isoformat(), approval["decided_by"], approval["id"]),
+            )
+            ledger._audit_row("sanctions_cleared", approval["decided_by"], json.dumps({
+                "payee": key, "rail": rail, "list": m.list, "uid": m.uid, "name": m.matched, "score": m.score,
+                "entry": m.entry, "approval": approval["id"],
+            }, sort_keys=True))
+        return True
+
+    def expire(self, ledger, by: str) -> list[dict]:
+        """Forget each cleared payee whose entry changed or left the lists, so that a new
+        listing is held again. Run after every update."""
+        _, _, names, _ = self._load()
+        listed = {(e["list"], e["uid"]): fingerprint(e) for _, e, _ in names}
+        ended = [c for c in cleared(ledger) if listed.get((c["list"], c["uid"])) != c["entry"]]
+        for c in ended:
+            why = "changed" if (c["list"], c["uid"]) in listed else "removed"
+            _forget(ledger, c, by, f"entry {why}")
+        return ended
 
     def summary(self, now: datetime | None = None) -> str:
         """One line for status: which lists, how old, and whether payees are screened."""
@@ -255,3 +307,28 @@ class Screen:
         if self.stale(now):
             line += f"\n  STALE (over {self.stale_days} days): new payees wait for a person"
         return line
+
+
+def cleared(ledger) -> list[dict]:
+    """Every payee cleared of a close match, newest first."""
+    return dicts(ledger.db.execute(
+        "select payee, list, uid, entry, cleared_at, cleared_by, approval_id from sanctions_cleared"
+        " order by cleared_at desc"
+    ))
+
+
+def forget(ledger, payee: str, by: str) -> list[dict]:
+    """Forget a payee's clearings: its next payment is held for a person again."""
+    key = " ".join(words(payee))
+    gone = [c for c in cleared(ledger) if c["payee"] == key]
+    for c in gone:
+        _forget(ledger, c, by, "forgotten")
+    return gone
+
+
+def _forget(ledger, c: dict, by: str, why: str) -> None:
+    with ledger._write():
+        ledger.db.execute("delete from sanctions_cleared where payee = ? and list = ? and uid = ?",
+                          (c["payee"], c["list"], c["uid"]))
+        ledger._audit_row("sanctions_uncleared", by, json.dumps(
+            {"payee": c["payee"], "list": c["list"], "uid": c["uid"], "reason": why}, sort_keys=True))

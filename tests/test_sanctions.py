@@ -1,6 +1,8 @@
 import io
 import json
 import os
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -209,3 +211,104 @@ def test_cli_update_audits_what_it_fetched(tmp_path, capsys, monkeypatch):
     assert "sdn: published 2026-10-28, 4 records" in capsys.readouterr().out
     rows = [json.loads(a["detail"]) for a in Ledger(db).audit_log() if a["action"] == "sanctions_update"]
     assert {r["list"] for r in rows} == {"sdn", "consolidated"} and all(len(r["sha256"]) == 64 for r in rows)
+
+
+CLOSE = "Banco Nacionale de Cuba S.A."  # a close match on SDN entity 306
+
+
+def held_then_approved(url, ledger, payee=CLOSE, usd="1", by="dana"):
+    """A payment held by the screen, approved by `by`, and retried with its approval."""
+    body = {"rail": "x402", "payee": payee, "amount_usd": usd}
+    status, held = call(url + "/authorize", body)
+    assert json.loads(held)["error"] == "approval_required"
+    approval = json.loads(held)["approval_id"]
+    ledger.decide_approval(approval, True, by)
+    status, _ = call(url + "/authorize", body, {**HEADERS, "x-quarter-approval": approval})
+    assert status == 200
+    return approval
+
+
+def test_a_person_clearing_a_close_match_is_remembered_in_the_chain(gateway):
+    url, ledger, _ = gateway
+    approval = held_then_approved(url, ledger)
+    assert pay(url, CLOSE)[0] == 200  # not held again
+    assert pay(url, "banco nacionale de cuba")[0] == 200  # the same name, folded
+    [c] = sanctions.cleared(ledger)
+    assert (c["list"], c["uid"], c["cleared_by"], c["approval_id"]) == ("sdn", "306", "dana", approval)
+    [row] = [a for a in ledger.audit_log() if a["action"] == "sanctions_cleared"]
+    assert row["client"] == "dana" and json.loads(row["detail"])["approval"] == approval
+    assert screens(ledger)[0]["outcome"] == "cleared"
+    assert ledger.verify_chain()["audit"]["intact"]
+
+
+def test_exact_matches_and_mixed_reasons_are_never_remembered(gateway):
+    url, ledger, _ = gateway
+    held_then_approved(url, ledger, "Ali Hassan")  # an exact SDN name: held every time
+    assert pay(url, "Ali Hassan")[1]["error"] == "approval_required"
+    held_then_approved(url, ledger, usd="50")  # also over the approval line: not for the match alone
+    assert pay(url, CLOSE)[1]["error"] == "approval_required"
+    held_then_approved(url, ledger, by="admin")  # the shared admin key names no one
+    assert pay(url, CLOSE)[1]["error"] == "approval_required"
+    assert sanctions.cleared(ledger) == []
+    assert pay(url, WALLET)[1]["error"] == "sanctions_match"  # refusals are unchanged
+
+
+def test_a_list_update_that_changes_or_drops_the_entry_forgets_it(gateway, capsys, monkeypatch):
+    url, ledger, gw = gateway
+    held_then_approved(url, ledger)
+    sdn = (FIXTURES / "SDN.XML").read_bytes()
+    changed = sdn.replace(b"<program>CUBA</program>", b"<program>CUBA</program><program>SDGT</program>")
+    sanctions.update(gw.sanctions.folder, opener(fixture_files() | {"SDN.XML": changed}))
+    assert pay(url, CLOSE)[1]["error"] == "approval_required"  # changed: held, even before expire
+    assert [c["uid"] for c in gw.sanctions.expire(ledger, "ops")] == ["306"]
+
+    held_then_approved(url, ledger)
+    start, end = sdn.index(b"  <sdnEntry>"), sdn.index(b"  <sdnEntry>", sdn.index(b"<uid>306"))
+    dropped = (sdn[:start] + sdn[end:]).replace(b"<Record_Count>4", b"<Record_Count>3")
+    sanctions.update(gw.sanctions.folder, opener(fixture_files() | {"SDN.XML": dropped}))
+    assert pay(url, CLOSE)[0] == 200  # off the list
+    assert len(gw.sanctions.expire(ledger, "ops")) == 1
+    sanctions.update(gw.sanctions.folder, opener(fixture_files()))  # listed again: a new listing
+    assert pay(url, CLOSE)[1]["error"] == "approval_required"
+    reasons = [json.loads(a["detail"])["reason"] for a in ledger.audit_log() if a["action"] == "sanctions_uncleared"]
+    assert reasons == ["entry removed", "entry changed"]
+
+
+def test_card_swipes_remember_a_cleared_merchant(gateway):
+    url, ledger, _ = gateway
+    swipe = request(500, merchant=CLOSE)
+    approval = post(url, swipe)[1]["metadata"]["quarter_approval"]
+    ledger.decide_approval(approval, True, "dana")
+    assert post(url, swipe)[1]["approved"] is True
+    assert post(url, swipe)[1]["approved"] is True and len(sanctions.cleared(ledger)) == 1
+
+
+def test_cli_lists_and_forgets_cleared_payees(gateway, capsys, monkeypatch):
+    url, ledger, gw = gateway
+    held_then_approved(url, ledger)
+    monkeypatch.setenv("QUARTER_SANCTIONS", gw.sanctions.folder)
+    main(["--db", ledger.path, "sanctions", "cleared"])
+    assert "banco cuba de nacionale  sdn entry 306  cleared by dana" in capsys.readouterr().out
+    main(["--db", ledger.path, "sanctions", "forget", CLOSE])
+    assert "forgotten" in capsys.readouterr().out and sanctions.cleared(ledger) == []
+    assert pay(url, CLOSE)[1]["error"] == "approval_required"
+    main(["--db", ledger.path, "sanctions", "forget", CLOSE])
+    assert "not cleared" in capsys.readouterr().out
+    held_then_approved(url, ledger)
+    monkeypatch.setattr(sanctions.urllib.request, "urlopen", opener(fixture_files()))
+    main(["--db", ledger.path, "sanctions", "update"])  # the entry is unchanged: still cleared
+    assert "no longer cleared" not in capsys.readouterr().out and len(sanctions.cleared(ledger)) == 1
+
+
+def test_clearing_while_the_agent_waits_is_remembered(gateway):
+    url, ledger, gw = gateway
+    done = []
+    waiter = threading.Thread(target=lambda: done.append(pay(url, CLOSE, {**HEADERS, "x-quarter-wait": "10"})))
+    waiter.start()
+    while not ledger.approvals():
+        time.sleep(0.02)
+    approval = ledger.approvals()[0]["id"]
+    ledger.decide_approval(approval, True, "dana")
+    gw.decided(approval)
+    waiter.join()
+    assert done[0][0] == 200 and pay(url, CLOSE)[0] == 200

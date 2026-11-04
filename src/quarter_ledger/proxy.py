@@ -23,6 +23,8 @@ Before forwarding, the worst-case cost is held: every request byte counted as an
 token (tokens are at least one byte) plus max_tokens of output, or the flat per-request
 price. Over a cap: 402. Over an approval limit: 403 with an approval id. Neither call
 reaches the vendor.
+Past QUARTER_FREE_DECISIONS in a month, calls are decided as ever and each reply carries
+x-quarter-free-limit: exceeded.
 
 Streamed responses are passed through as they arrive, and usage is read from the stream
 (OpenAI-style chat completions are asked to include it). When a vendor reports no usage,
@@ -296,10 +298,15 @@ class Gateway:
         """None if the payee may be paid, "ask" if a person must agree, "deny" if refused."""
         return payee_rule(self.payees, rail, payee)
 
-    def screen(self, rail: str, payee: str) -> tuple[str | None, str | None]:
-        """The sanctions screen's (refuse, ask) for a payment; (None, None) with no list stored."""
+    def screen(self, rail: str, payee: str, approval_id: str | None = None) -> tuple[str | None, str | None]:
+        """The sanctions screen's (refuse, ask) for a payment; (None, None) with no list stored.
+        approval_id is the approval the payment carries: decided by a named person, it may
+        clear the payee of a close match."""
         if not self.sanctions:
             return None, None
+        approval = self.ledger.approval(approval_id) if approval_id else None
+        if approval and approval["decided_by"] == LEGACY_ADMIN:  # the shared key names no one
+            approval = None
 
         def known() -> bool:  # on the payee list, or paid before
             if payee.lower() in {p.lower() for p in self.payees.get(rail, [])}:
@@ -308,7 +315,7 @@ class Gateway:
                 "select 1 from entries where vendor = ? and kind = 'hold' limit 1", (f"{rail}:{payee}",)
             ).fetchone() is not None
 
-        return self.sanctions.review(self.ledger, rail, payee, known)
+        return self.sanctions.review(self.ledger, rail, payee, known, approval)
 
     def locked_out(self, client: str) -> bool:
         cutoff = time.monotonic() - LOGIN_WINDOW
@@ -1334,7 +1341,7 @@ class Handler(BaseHTTPRequestHandler):
         rule, shadow = gw.payee_rule(rail, payee), gw.shadowing
         if rule == "deny" and not (shadow.payees or shadow.everything):
             return self._json(403, {"error": "payee_not_allowed", "payee": payee})
-        refuse, screened = gw.screen(rail, payee)
+        refuse, screened = gw.screen(rail, payee, self.headers.get("x-quarter-approval"))
         if refuse:
             return self._json(403, {"error": "sanctions_match", "payee": payee, "reason": refuse})
         wait = self._wait()
@@ -1348,6 +1355,7 @@ class Handler(BaseHTTPRequestHandler):
         used = self.headers.get("x-quarter-approval")
         args = (gw.caps, ids, f"{rail}:{payee}", rail, amount)
         decision, ref = gw.ledger.hold(*args, used, ask=ask, deny=deny, shadow=shadow, sanctions=screened)
+        self._free_limit()
         if decision.outcome == "approve":
             gw.announce_approval(ref, ids, rail, payee, amount, decision.reason)
             approval = gw.wait_for_decision(ref, min(wait, gw.max_wait)) if wait > 0 else None
@@ -1358,6 +1366,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._approval_required(decision.reason, ref)
             # Approved while waiting: go on as if the agent retried with the id.
             used = ref
+            if screened:  # as the retry would, so a person's clearing is remembered
+                gw.screen(rail, payee, used)
             decision, ref = gw.ledger.hold(*args, used, ask=ask, deny=deny, shadow=shadow, sanctions=screened)
         if decision.outcome == "block":
             return self._refuse(decision.reason)
@@ -1475,12 +1485,13 @@ class Handler(BaseHTTPRequestHandler):
         rule, shadow = gw.payee_rule("card", payee), gw.shadowing
         if rule == "deny" and not (shadow.payees or shadow.everything):
             return answer(False, reason="payee_not_allowed")
-        refuse, screened = gw.screen("card", payee)
+        vendor = f"card:{payee}"
+        approval = gw.ledger.approved_for(ids["agent"], vendor, amount)
+        refuse, screened = gw.screen("card", payee, approval)
         if refuse:
             return answer(False, reason=refuse[:200])
-        vendor = f"card:{payee}"
         decision, ref = gw.ledger.hold(
-            gw.caps, ids, vendor, "card", amount, gw.ledger.approved_for(ids["agent"], vendor, amount),
+            gw.caps, ids, vendor, "card", amount, approval,
             ask=f"{payee} is not on the card payee list" if rule == "ask" else None,
             deny=f"{payee} is not allowed on the card payee list" if rule == "deny" else None,
             shadow=shadow, sanctions=screened,
@@ -1635,6 +1646,7 @@ class Handler(BaseHTTPRequestHandler):
             decision, ref = gw.ledger.hold(gw.caps, ids, vendor, model, held, approval_id, fallback, shadow=gw.shadowing)
         except sqlite3.Error as e:
             return self._ledger_down(e, ids, vendor, model, held, approval_id)
+        self._free_limit()
         if decision.outcome == "approve":
             gw.announce_approval(ref, ids, vendor, model, held, decision.reason)
             approval = gw.wait_for_decision(ref, wait) if wait else None
@@ -1654,6 +1666,11 @@ class Handler(BaseHTTPRequestHandler):
         if decision.would_hold:
             self._extra["x-quarter-shadow"] = f"would_{decision.would_hold.outcome}"
         return decision, ref
+
+    def _free_limit(self) -> None:
+        """Past the month's free decisions the call is decided as ever, and its reply says so."""
+        if self.gw.ledger.over_free_limit():
+            self._extra["x-quarter-free-limit"] = "exceeded"
 
     def _ledger_down(self, error, ids, vendor, model, held, approval_id):
         """The hold could not be written. Fail-open lets a plain model call through, written

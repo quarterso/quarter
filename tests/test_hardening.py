@@ -483,3 +483,23 @@ def test_cli_approve_says_who_decided(tmp_path, capsys, monkeypatch):
         cli.main(["--db", db, "approve", apr, "--as", "Ann"])
     assert done.value.code == 0
     assert capsys.readouterr().out.strip() == f"{apr} approved by Ann"
+
+
+def test_writers_in_one_process_never_meet_a_locked_database(tmp_path):
+    ledger = Ledger(str(tmp_path / "l.db"))
+    caps = [Cap("agent", "*", "day", to_micros(1000))]
+    errors = []
+
+    def call(i):
+        ledger.db.execute("pragma busy_timeout=0")  # with no wait, any clash in SQLite would fail
+        try:
+            ledger.hold(caps, {"agent": f"a{i % 3}", "task": None, "customer": None}, "fake", "m", to_micros("0.01"))
+        except sqlite3.OperationalError as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=call, args=(i,)) for i in range(64)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []

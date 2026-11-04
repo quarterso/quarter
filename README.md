@@ -5,7 +5,7 @@ Spending caps, human approvals and a tamper-evident ledger for what AI agents sp
 ## Install
 
 - From source: `git clone https://github.com/quarterso/quarter && cd quarter && uv sync`
-- From PyPI: `pip install quarter-ledger` (the `quarter-ledger` command; the demo below needs the source)
+- From PyPI: `uv tool install quarter-ledger` or `pipx install quarter-ledger` (the `quarter-ledger` command; the demo below needs the source)
 - As a container: run `quarter-ledger init` once for a `.env` with fresh keys, then `docker run -p 8780:8780 --env-file .env -v quarter:/data ghcr.io/quarterso/quarter`. Without agent keys the gateway refuses to listen beyond localhost.
 
 ## Try it in two minutes
@@ -507,6 +507,8 @@ Every payee is screened against the US Treasury's OFAC lists before Quarter allo
   - Refused: a wallet address on the SDN list, or the exact name of an SDN entity (`403 sanctions_match`, or a declined swipe).
   - Waits for a person, who sees the entry, its id, its programs and the score: an exact match on a person's name, a close match, or any match on the Consolidated list. A name alone does not identify a person: "Hassan Ali" is on the SDN list and is a common name. The Consolidated list's programs mostly restrict rather than block.
   - An approval covers one payment, like any approval. The next payment to the same payee is screened again.
+  - Cleared payees: when a named person approves a payment held only for a close match, Quarter remembers that payee as cleared for that entry and stops holding it. The audit log records who cleared it (`sanctions_cleared`). Exact matches are never remembered, and neither is an approval made with the shared admin key. When `sanctions update` finds the entry changed or gone from the list, the payee is forgotten, so a new listing is held again.
+  - `uv run quarter-ledger sanctions cleared` lists cleared payees and who cleared them. `sanctions forget "<name>"` makes the next payment wait for a person again.
   - Shadow mode does not pass any of these.
 - **Stale lists:** older than 7 days since the last download (`QUARTER_SANCTIONS_STALE_DAYS`), a payment to a new payee waits for a person. A payee paid before, or on the payee list, goes on. Nothing passes unscreened: every result is in the audit log with `stale` set. `status` and the gateway's start show the list dates and say STALE.
 - **No lists stored:** payees are not screened, and `status` and the gateway's start say so.
@@ -604,6 +606,7 @@ It covers a ledger that fails while the gateway runs. A ledger that cannot be op
 - **`QUARTER_FAIL_OPEN`:** optional. `model` or `off` (the default). See If the ledger is down.
 - **`QUARTER_MAX_WAIT`:** optional. The longest `x-quarter-wait` in whole seconds, 1 to 300 (the default). Set it under a proxy's own timeout: Cloudflare cuts requests at about 125 seconds, so `docs/HOSTED.md` sets 110.
 - **`QUARTER_CLIENT_IP_HEADER`:** optional. The header a reverse proxy puts the caller's address in (`x-forwarded-for` behind Caddy, `cf-connecting-ip` behind Cloudflare). The lockout after 10 wrong keys and the audit log then go by the caller, not the proxy. Set it only when the gateway is reachable through that proxy alone, since a caller who reaches it directly can send any address.
+- **`QUARTER_FREE_DECISIONS`:** optional, for a hosted free tier. The decisions a UTC month includes: each model call the gateway decides and each `POST /authorize`, card swipe and bill. A retry with `x-quarter-approval` is not counted again. Past the limit every call is still decided as before. Each reply then carries `x-quarter-free-limit: exceeded`, the month gets one `free_limit` audit row, and `status` and the dashboard say so. Unset, nothing is counted.
 - **`QUARTER_REGISTER`:** optional. `on`, `shadow` or `off` (the default). See Agent register and quarterly review.
 - **`QUARTER_RULES`:** optional. What each agent may do on each upstream. See Keep credentials away from agents.
 - **`QUARTER_MERCURY_TOKEN`, `QUARTER_MERCURY_ACCOUNT`:** optional. Your Mercury API token and account id, to pay bills. See Bill pay.

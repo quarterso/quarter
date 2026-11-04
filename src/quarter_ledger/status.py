@@ -91,6 +91,12 @@ def render(ledger: Ledger, caps: list[Cap], now: datetime | None = None,
         when = "already reached" if w["reached"] == "already" else f"reached {w['reached']}"
         lines.append(f"  {red}{w['cap']} cap {usd_shown(w['limit'])}: {when}{reset}")
 
+    if ledger.free_decisions is not None:
+        used = ledger.decisions(f"{now:%Y-%m}")
+        lines += ["", f"Decisions this month: {used} of {ledger.free_decisions} free"]
+        if used > ledger.free_decisions:
+            lines.append(f"  {red}Over the free limit: calls are still decided, replies say so{reset}")
+
     waiting = ledger.approvals()
     lines += ["", f"Approvals waiting: {len(waiting)}"]
     for a in waiting:

@@ -254,6 +254,14 @@ def _shadow(ledger: Ledger, shadow: list[str], start: datetime, end: datetime) -
     )
 
 
+def _free_limit(ledger: Ledger, now: datetime) -> str:
+    if not ledger.over_free_limit():
+        return ""
+    used = ledger.decisions(f"{now:%Y-%m}")
+    return (f"<p class=shadow><b>Over the free limit.</b> {used} decisions this month, {ledger.free_decisions}"
+            " free. Calls are still decided; each reply carries <code>x-quarter-free-limit: exceeded</code>.</p>")
+
+
 def _picker(ledger: Ledger, chosen: str, now: datetime) -> str:
     """A month to show: each from the first one with spend to this one, newest first."""
     first = ledger.db.execute("select min(at) from entries").fetchone()[0]
@@ -338,6 +346,7 @@ def render(ledger: Ledger, caps: list[Cap], signed_in: str = "", can_decide: boo
 <div class=head><div><h1>Agent spend</h1><p class=sub>{start:%B %Y}, {"charges so far" if current else "the whole month"}</p></div>
 {_picker(ledger, month, now)}</div>
 {_shadow(ledger, shadow or [], start, end)}
+{_free_limit(ledger, now)}
 <div class=cards>
 <div class=card><b>{usd(total)}</b>Spent by agents</div>
 <div class=card><b>{usd(spent_on)}</b>Spent on agents</div>

@@ -39,7 +39,7 @@ def test_example_renders_every_file(tmp_path):
     compose = (tmp_path / "compose.yaml").read_text()
     assert "env_file: env/acme.env" in compose and "mem_limit: 96m" in compose
     assert 'QUARTER_MAX_WAIT: "110"' in compose and "enable_ipv6: true" in compose
-    assert 'network_mode: "service:sandbox"' in compose and "internal: true" in compose
+    assert 'network_mode: "service:sandbox-mock"' in compose and "internal: true" in compose
 
 
 def test_no_tenant_shares_a_network_with_another():

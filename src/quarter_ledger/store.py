@@ -153,6 +153,23 @@ create table if not exists audit (
   client text,
   detail text
 );
+-- Payees a named person cleared of a close sanctions match (sanctions.py), while the
+-- list entry is unchanged. Each clearing and forgetting is in the audit log.
+create table if not exists sanctions_cleared (
+  payee text not null,
+  list text not null,
+  uid text not null,
+  entry text not null,
+  cleared_at text not null,
+  cleared_by text not null,
+  approval_id text,
+  primary key (payee, list, uid)
+);
+-- Decisions made each UTC month (YYYY-MM), counted only with QUARTER_FREE_DECISIONS set.
+create table if not exists decisions (
+  month text primary key,
+  count integer not null
+);
 """
 
 SCOPE_COLUMNS = {"agent", "task", "customer", "vendor"}
@@ -207,7 +224,10 @@ class Ledger:
         self._local = threading.local()
         self._sums: dict[tuple, tuple[int, int]] = {}  # see spent
         self._sums_lock = threading.Lock()
+        self._write_lock = threading.Lock()  # this process's writers queue here, not in SQLite's busy retries
         self.register: agent_register.RegisterRule | None = None  # QUARTER_REGISTER: see hold
+        self.free_decisions: int | None = None  # QUARTER_FREE_DECISIONS: see _count_decision
+        self._free_noted: str | None = None  # the month whose free_limit row is known written
         self.db.execute("pragma journal_mode=wal")
         self.db.executescript(SCHEMA)
         with self._write():  # locked, so two processes opening at once cannot race
@@ -233,15 +253,16 @@ class Ledger:
 
     @contextmanager
     def _write(self):
-        self.db.execute("begin immediate")
-        try:
-            yield
-            self.db.execute("commit")
-        except BaseException:
-            self.db.execute("rollback")
-            with self._sums_lock:  # a sum may have counted entries that are now gone
-                self._sums.clear()
-            raise
+        with self._write_lock:
+            self.db.execute("begin immediate")
+            try:
+                yield
+                self.db.execute("commit")
+            except BaseException:
+                self.db.execute("rollback")
+                with self._sums_lock:  # a sum may have counted entries that are now gone
+                    self._sums.clear()
+                raise
 
     def spent(self, scope: str, value: str, since: datetime | None, observed: bool = False) -> int:
         """Charges plus holds that are still open. Observed spend (connect.py) only with
@@ -320,6 +341,8 @@ class Ledger:
         through and is not a review."""
         shadow = shadow or Shadow()
         with self._write():
+            if self.free_decisions is not None and approval_id is None:  # a retry was counted already
+                self._count_decision()
             paused = self.pause_reason(ids)
             if paused is not None and not shadow.everything:
                 return Decision("block", paused), None
@@ -393,6 +416,30 @@ class Ledger:
                 decision = covered if covered.outcome == "allow" else decision
                 standing = standing if covered.outcome == "allow" else None
         return decision, standing
+
+    def _count_decision(self) -> None:
+        """One more decision this month, inside hold's transaction. Past the free limit the
+        gateway goes on deciding; a free_limit audit row records the month once."""
+        month = now()[:7]
+        self.db.execute(
+            "insert into decisions (month, count) values (?, 1)"
+            " on conflict (month) do update set count = count + 1", (month,)
+        )
+        if self._free_noted == month or self.decisions(month) <= self.free_decisions:
+            return
+        if not self.db.execute(
+            "select 1 from audit where action = 'free_limit' and detail = ?", (month,)
+        ).fetchone():
+            self._audit_row("free_limit", None, month)
+        self._free_noted = month
+
+    def decisions(self, month: str) -> int:
+        """Decisions counted in a month (YYYY-MM): 0 unless QUARTER_FREE_DECISIONS was set."""
+        row = self.db.execute("select count from decisions where month = ?", (month,)).fetchone()
+        return row[0] if row else 0
+
+    def over_free_limit(self) -> bool:
+        return self.free_decisions is not None and self.decisions(now()[:7]) > self.free_decisions
 
     def _register_reason(self, ids) -> str | None:
         """Why the register sends this agent's call to a person, inside hold's transaction:
