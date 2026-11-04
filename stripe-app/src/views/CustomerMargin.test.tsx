@@ -37,6 +37,15 @@ test('shows this month and last for the customer on the page', async () => {
   expect(wrapper).not.toContainComponent(Banner);
 });
 
+test("uses the vendor's own figures once Quarter has reconciled the month", async () => {
+  (loadSettings as jest.Mock).mockResolvedValue(settings);
+  (customerMargin as jest.Mock).mockImplementation(async (_s, month) =>
+    ({...row(month), actual_cost: 1_000_000, actual_margin: 104_000_000}));
+  const wrapper = await shown();
+  expect(wrapper).toContainText('$1.00');
+  expect(wrapper).toContainText('$104.00 (99.0%)');
+});
+
 test('asks to connect Quarter before any key is saved', async () => {
   (loadSettings as jest.Mock).mockResolvedValue(null);
   const wrapper = await shown();

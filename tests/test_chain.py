@@ -60,6 +60,7 @@ def test_audit_pack_zip(tmp_path):
         "README.txt",
         "entries.csv",
         "exceptions.csv",
+        "reconciliation.csv",
         "approvals.csv",
         "audit_log.csv",
         "pauses.csv",

@@ -1,6 +1,6 @@
 [project]
 name = "quarter-ledger"
-version = "0.1.12"
+version = "0.1.13"
 description = "Spending caps, approvals and a tamper-evident ledger for what AI agents spend"
 readme = "README.md"
 license = { file = "LICENSE.md" }

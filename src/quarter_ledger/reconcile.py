@@ -252,3 +252,34 @@ def _row(model: str, vendor: int, quarter: int, tolerance_pct: float) -> dict:
         flag = "over" if abs(pct) > tolerance_pct else ""
     return {"model": model, "vendor": vendor, "quarter": quarter, "difference": difference,
             "difference_pct": pct, "flag": flag}
+
+
+def record(ledger: Ledger, vendor: str, month: str, source: str, out: dict, by: str) -> None:
+    """The month's match for this vendor, into the audit chain: what `close` leaves behind for
+    the audit pack, and for margin at the vendor's own figures."""
+    rows = [{"model": r["model"], "vendor": r["vendor"], "quarter": r["quarter"]} for r in out["rows"]]
+    ledger.audit("reconciled", by, json.dumps({
+        "month": month, "vendor": vendor, "source": source,
+        "vendor_total": out["total"]["vendor"], "quarter_total": out["total"]["quarter"], "rows": rows,
+    }))
+
+
+def recorded(ledger: Ledger, month: str) -> dict[str, dict]:
+    """The latest recorded match for the month, by vendor, with when and by whom."""
+    out = {}
+    for at, by, detail in ledger.db.execute(
+        "select at, client, detail from audit where action = 'reconciled'"
+        " and json_extract(detail, '$.month') = ? order by id", (month,),
+    ):
+        found = json.loads(detail)
+        out[found["vendor"]] = found | {"at": at, "by": by}
+    return out
+
+
+def unreconciled(ledger: Ledger, month: str) -> list[str]:
+    """Vendors Quarter can match that had spend this month and no recorded match."""
+    start, end = month_range(month)
+    spent = {v for (v,) in ledger.db.execute(
+        "select distinct vendor from entries where kind = 'charge' and at >= ? and at < ?",
+        (start.isoformat(), end.isoformat()))}
+    return sorted((spent & set(VENDORS)) - set(recorded(ledger, month)))

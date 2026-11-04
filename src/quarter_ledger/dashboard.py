@@ -295,10 +295,12 @@ def _margin(m: dict | str | None) -> str:
     def pct(value) -> str:
         return "" if value is None else f"{value:.1f}%"
 
+    actual = m.get("actual")
     rows = "".join(
         f"<tr><td>{escape(r['customer'])}</td><td class=n>{money(r['revenue'])}</td>"
         f"<td class=n>{money(r['ai_cost'])}</td><td class='n{' neg' if r['margin'] < 0 else ''}'>{money(r['margin'])}</td>"
-        f"<td class=n>{pct(r['margin_pct'])}</td></tr>" for r in m["rows"])
+        f"<td class=n>{pct(r['margin_pct'])}</td>"
+        + (f"<td class=n>{money(r['actual_cost'])}</td>" if actual else "") + "</tr>" for r in m["rows"])
     notes = m.get("stripe") or {}
     said = [f"{notes.get('invoices', 0)} Stripe invoice(s) paid this month, excluding tax"]
     if notes.get("skipped_currency"):
@@ -307,12 +309,17 @@ def _margin(m: dict | str | None) -> str:
         said.append("test mode data")
     if m["unassigned_cost"]:
         said.append(f"{usd(m['unassigned_cost'])} of AI spend named no customer")
+    if actual:
+        said.append(f"at the vendors' own figures ({', '.join(actual['vendors'])}), AI cost {money(actual['ai_cost'])}")
+        if actual["unattributed"]:
+            said.append(f"{usd(actual['unattributed'])} billed past what Quarter saw, given to no customer")
     return (f"<h2>Margin after AI cost</h2><div class=cards>"
             f"<div class=card><b>{money(m['revenue'])}</b>Revenue</div>"
             f"<div class=card><b>{money(m['ai_cost'])}</b>AI cost to serve</div>"
             f"<div class=card><b>{money(m['margin'])} {pct(m['margin_pct'])}</b>Margin after AI cost</div></div>"
-            + (f"<table><tr><th>Customer</th><th class=n>Revenue</th><th class=n>AI cost</th>"
-               f"<th class=n>Margin</th><th class=n>%</th></tr>{rows}</table>" if rows else "")
+            + ("<table><tr><th>Customer</th><th class=n>Revenue</th><th class=n>AI cost</th>"
+               "<th class=n>Margin</th><th class=n>%</th>"
+               + ("<th class=n>At vendor's figures</th>" if actual else "") + f"</tr>{rows}</table>" if rows else "")
             + f"<p class=sub>{escape('; '.join(said))}.</p>")
 
 

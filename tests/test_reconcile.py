@@ -204,3 +204,35 @@ def test_reconcile_command_from_the_api_and_clean_errors(tmp_path, capsys, monke
         main([*run, "--file", str(tmp_path / "missing.csv")])
     with pytest.raises(SystemExit, match="reconcile: .*October"):
         main(["--db", db, "reconcile", "--month", "October", "--vendor", "openai"])
+
+
+def test_close_records_each_match_for_the_pack(tmp_path, capsys, monkeypatch):
+    import zipfile
+
+    from quarter_ledger.evidence import audit_pack
+    from quarter_ledger.reconcile import recorded, unreconciled
+
+    monkeypatch.delenv("OPENAI_ADMIN_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_ADMIN_KEY", raising=False)
+    db = str(tmp_path / "l.db")
+    ledger = Ledger(db)
+    spend(ledger, "anthropic", "claude-opus-5-5", 20)
+    spend(ledger, "openai", "gpt-4o", 9)
+    costs = tmp_path / "costs.csv"
+    costs.write_text("date,model,amount\n2026-10-03,claude-opus-5-5,18\n")
+    with pytest.raises(SystemExit) as e:  # openai has spend and no figures: the close is not done
+        main(["--db", db, "close", "--month", "2026-10", "--file", f"anthropic={costs}", "--as", "Fay"])
+    assert e.value.code == 1
+    text = capsys.readouterr().out
+    assert "anthropic: vendor $18.00, Quarter $20.00, 1 model(s) flagged; recorded" in text
+    assert "openai: spent this month and not reconciled: set OPENAI_ADMIN_KEY" in text
+    assert unreconciled(ledger, "2026-10") == ["openai"]
+    match = recorded(ledger, "2026-10")["anthropic"]
+    assert (match["by"], match["source"], match["vendor_total"]) == ("Fay", "file", to_micros(18))
+
+    summary = audit_pack(ledger, "2026-10", str(tmp_path / "pack.zip"), retention_days=2555)
+    assert any("Spend with openai this month has no reconciliation" in w for w in summary["warnings"])
+    rows = zipfile.ZipFile(tmp_path / "pack.zip").read("reconciliation.csv").decode().splitlines()
+    assert rows[1].startswith(f"anthropic,claude-opus-5-5,{to_micros(18)},{to_micros(20)},file,")
+    with pytest.raises(SystemExit, match="VENDOR=FILE"):
+        main(["--db", db, "close", "--month", "2026-10", "--file", "stripe=x.csv"])

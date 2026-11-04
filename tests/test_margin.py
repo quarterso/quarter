@@ -72,7 +72,7 @@ def test_margin_command(tmp_path, capsys):
     assert "costs more than it pays" in text
 
     main(["--db", db, "margin", "--month", month, "--revenue", str(revenue), "--csv"])
-    assert capsys.readouterr().out.splitlines()[1] == "acme,100.00,150.00,-50.00,-50.0"
+    assert capsys.readouterr().out.splitlines()[1] == "acme,100.00,150.00,-50.00,-50.0,,"
 
 
 class FakeStripe(BaseHTTPRequestHandler):
@@ -150,3 +150,35 @@ def test_margin_command_from_stripe(tmp_path, capsys, monkeypatch, stripe_url):
     text = capsys.readouterr().out
     assert "Stripe: 2 invoice(s) paid" in text and "TEST MODE" in text
     assert "revenue $105.00" in text
+
+
+def test_margin_at_the_vendors_own_figures(tmp_path, capsys):
+    from quarter_ledger import reconcile
+
+    db = str(tmp_path / "l.db")
+    ledger = Ledger(db)
+    for customer, model, usd in (("acme", "gpt-4o", 60), ("globex", "gpt-4o", 40), ("acme", "o3", 10)):
+        _, call = ledger.hold([], {"agent": "a", "customer": customer}, "openai", model, to_micros(usd))
+        ledger.settle(call, to_micros(usd))
+    month = this_month(ledger)
+    assert margins(ledger, month, {})["actual"] is None  # nothing reconciled yet
+    # gpt-4o billed at 80% of list (a discount); o3 billed above what Quarter saw
+    vendor = {"gpt-4o-2024-08-06": to_micros(80), "o3": to_micros(15)}
+    seen, _ = reconcile.quarter_side(ledger, "openai", month)
+    reconcile.record(ledger, "openai", month, "api", reconcile.compare(vendor, seen, 2.0), "Fay")
+    out = margins(ledger, month, {"acme": to_micros(100)})
+    acme = next(r for r in out["rows"] if r["customer"] == "acme")
+    assert (acme["ai_cost"], acme["actual_cost"], acme["actual_margin"]) == (to_micros(70), to_micros(58), to_micros(42))
+    assert next(r for r in out["rows"] if r["customer"] == "globex")["actual_cost"] == to_micros(32)
+    assert out["actual"] == {"vendors": ["openai"], "ai_cost": to_micros(90), "unattributed": to_micros(5)}
+
+    main(["--db", db, "margin", "--month", month, "--revenue", str(_csv(tmp_path, "customer,amount\nacme,100\n"))])
+    text = capsys.readouterr().out
+    assert "at the vendors' own figures (openai reconciled by `close`): AI cost $90.00" in text
+    assert "$5.00 billed past what Quarter saw, given to no customer" in text
+
+
+def _csv(tmp_path, text):
+    path = tmp_path / "revenue.csv"
+    path.write_text(text)
+    return path

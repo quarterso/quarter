@@ -15,7 +15,7 @@ from math import ceil
 from statistics import median
 
 from .money import to_micros
-from .reconcile import _get
+from .reconcile import _get, recorded, same_model
 from .store import Ledger, month_range
 
 CUSTOMER_COLUMNS = ("customer", "customer_id", "customer id", "customer name")
@@ -136,6 +136,40 @@ def ai_cost(ledger: Ledger, month: str) -> tuple[dict[str, int], int]:
     return by_customer, unassigned
 
 
+def actual_costs(ledger: Ledger, month: str) -> dict | None:
+    """Each customer's AI cost at the vendor's own figures, for a month `close` reconciled;
+    None when no vendor was. Per model, where the vendor charged less than Quarter recorded
+    (discounts, caching, credits), each customer's cost is scaled down by the same share.
+    Where it charged more, the excess may be calls Quarter never saw, so customers keep their
+    recorded cost and the excess is shown apart as not attributed. Models the vendor did not
+    report, and spend connect booked from the vendor's own cost API, stay as recorded."""
+    matched = recorded(ledger, month)
+    if not matched:
+        return None
+    ratio, excess = {}, 0
+    for vendor, found in matched.items():
+        for r in found["rows"]:
+            key = (vendor, same_model(r["model"].split(" / ")[0]))
+            if r["quarter"] and r["vendor"] < r["quarter"]:
+                ratio[key] = (r["vendor"], r["quarter"])
+            excess += max(r["vendor"] - r["quarter"], 0)
+    start, end = month_range(month)
+    out: dict[str, int] = {}
+    for customer, vendor, model, call, amount in ledger.db.execute(
+        "select customer, vendor, coalesce(model, '(no model)'), call_id, amount from entries"
+        " where kind = 'charge' and at >= ? and at < ?", (start.isoformat(), end.isoformat()),
+    ):
+        own = call.startswith(f"obs:{vendor}:")  # booked from the vendor's own figures already
+        excess -= amount if own and vendor in matched else 0
+        if customer:
+            vendor_total, quarter_total = (None, None) if own else ratio.get((vendor, same_model(model)), (None, None))
+            out[customer] = out.get(customer, 0) + (amount * vendor_total // quarter_total if quarter_total else amount)
+    for cost in ledger.costs_in(month):
+        if cost["customer"]:
+            out[cost["customer"]] = out.get(cost["customer"], 0) + cost["amount"]
+    return {"by_customer": out, "unattributed": max(excess, 0), "vendors": sorted(matched)}
+
+
 def margins(ledger: Ledger, month: str, revenue: dict[str, int]) -> dict:
     """One row per customer with revenue or AI cost, worst margin first, and the totals
     finance asks about: margin overall, AI cost with no revenue behind it, how much of
@@ -155,6 +189,10 @@ def margins(ledger: Ledger, month: str, revenue: dict[str, int]) -> dict:
             }
         )
     rows.sort(key=lambda r: (r["margin_pct"] is not None, r["margin_pct"] or 0, -r["ai_cost"]))
+    actual = actual_costs(ledger, month)
+    for r in rows if actual else []:
+        r["actual_cost"] = actual["by_customer"].get(r["customer"], 0)
+        r["actual_margin"] = r["revenue"] - r["actual_cost"]
 
     total_rev, total_cost = sum(revenue.values()), sum(cost.values())
     costs = sorted(cost.values(), reverse=True)
@@ -173,4 +211,9 @@ def margins(ledger: Ledger, month: str, revenue: dict[str, int]) -> dict:
         "heavy_share_pct": sum(costs[:heavy]) / total_cost * 100 if total_cost else None,
         "median_cost": int(median(costs)) if costs else 0,
         "unassigned_cost": unassigned,
+        "actual": None if actual is None else {
+            "vendors": actual["vendors"],
+            "ai_cost": sum(r["actual_cost"] for r in rows),
+            "unattributed": actual["unattributed"],
+        },
     }

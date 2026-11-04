@@ -83,7 +83,7 @@ import sqlite3
 import sys
 import urllib.request
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from . import (
@@ -105,7 +105,9 @@ from . import (
     underwriting,
     wallets,
 )
+from .board import board
 from .capitalise import capitalised, read_projects, reclass
+from .commits import read_commits, standing
 from .evidence import audit_pack
 from .export import (
     FORMATS,
@@ -128,8 +130,18 @@ from .policy import load_caps
 from .pricing import PriceBook, with_built_in
 from .proxy import MAX_WAIT, UPSTREAMS, VENDOR_KEY_ENV, Gateway, serve, show_decision_in_slack
 from .receipts import public_key, sign, verify
-from .reconcile import KEY_ENV, VENDORS, compare, fetch, quarter_side, read_costs
+from .reconcile import (
+    KEY_ENV,
+    VENDORS,
+    compare,
+    fetch,
+    quarter_side,
+    read_costs,
+    record,
+    unreconciled,
+)
 from .register import listing, load_register, review
+from .reprice import read_as_model, reprice
 from .rules import Rules, load_rules
 from .runaway import load_runaway
 from .shadow import replay, shadow_report
@@ -992,21 +1004,37 @@ def run_capitalise(args, ledger):
         print(f"  {len(out['conflicts'])} call(s) matched more than one project and were left out")
 
 
-def run_margin(args, ledger):
-    notes = None
+def load_revenue(args, name: str) -> tuple[dict[str, int] | None, dict | None]:
+    """Revenue for the month from --stripe or --revenue, and Stripe's notes; None if neither."""
     if args.stripe:
         key = os.environ.get(STRIPE_KEY_ENV)
         if not key:
-            sys.exit(f"margin: set {STRIPE_KEY_ENV} to a restricted Stripe key that can read invoices and customers")
+            sys.exit(f"{name}: set {STRIPE_KEY_ENV} to a restricted Stripe key that can read invoices and customers")
         try:
-            revenue, notes = stripe_revenue(key, args.month)
+            return stripe_revenue(key, args.month)
         except ValueError as e:
-            sys.exit(f"margin: Stripe {e}")
-    else:
-        try:
-            revenue = read_revenue(Path(args.revenue).read_text())
-        except (OSError, ValueError) as e:
-            sys.exit(f"margin: {args.revenue}: {e}")
+            sys.exit(f"{name}: Stripe {e}")
+    if args.revenue is None:
+        return None, None
+    try:
+        return read_revenue(Path(args.revenue).read_text()), None
+    except (OSError, ValueError) as e:
+        sys.exit(f"{name}: {args.revenue}: {e}")
+
+
+def run_board(args, ledger):
+    revenue, _ = load_revenue(args, "board")
+    try:
+        centres = read_centres(Path(args.cost_centres).read_text()) if args.cost_centres else None
+        projects = read_projects(Path(args.projects).read_text()) if args.projects else None
+        commits = read_commits(config(args.commits)) if args.commits else None
+        print(board(ledger, args.month, revenue, centres, projects, commits), end="")
+    except (OSError, ValueError) as e:  # a bad month is a ValueError too
+        sys.exit(f"board: {e}")
+
+
+def run_margin(args, ledger):
+    revenue, notes = load_revenue(args, "margin")
     out = margins(ledger, args.month, revenue)
 
     def signed(micros):  # usd_display rounds negatives the wrong way
@@ -1020,10 +1048,12 @@ def run_margin(args, ledger):
 
     if args.csv:
         writer = csv.writer(sys.stdout)
-        writer.writerow(["customer", "revenue_usd", "ai_cost_usd", "margin_usd", "margin_pct"])
+        writer.writerow(["customer", "revenue_usd", "ai_cost_usd", "margin_usd", "margin_pct",
+                         "vendor_cost_usd", "vendor_margin_usd"])
         for r in out["rows"]:
+            at_vendor = [signed(r["actual_cost"]), signed(r["actual_margin"])] if out["actual"] else ["", ""]
             writer.writerow([r["customer"], signed(r["revenue"]), signed(r["ai_cost"]), signed(r["margin"]),
-                             pct(r["margin_pct"]).rstrip("%")])
+                             pct(r["margin_pct"]).rstrip("%"), *at_vendor])
         return
     if notes:
         print(f"Stripe: {notes['invoices']} invoice(s) paid in {out['month']}, excluding tax, less credit notes"
@@ -1034,8 +1064,15 @@ def run_margin(args, ledger):
     for r in out["rows"]:
         flag = "  no revenue" if r["revenue"] <= 0 < r["ai_cost"] else (
             "  costs more than it pays" if r["margin"] < 0 else "")
+        at_vendor = f"  at vendor {usd(r['actual_cost']):>11}" if out["actual"] else ""
         print(f"  {r['customer']:<22} revenue {usd(r['revenue']):>12}  AI {usd(r['ai_cost']):>11}"
-              f"  margin {usd(r['margin']):>12} {pct(r['margin_pct']):>7}{flag}")
+              f"  margin {usd(r['margin']):>12} {pct(r['margin_pct']):>7}{at_vendor}{flag}")
+    if out["actual"]:
+        a = out["actual"]
+        print(f"  at the vendors' own figures ({', '.join(a['vendors'])} reconciled by `close`): AI cost"
+              f" {usd(a['ai_cost'])}, margin {usd(out['revenue'] - a['ai_cost'])}"
+              + (f"; {usd(a['unattributed'])} billed past what Quarter saw, given to no customer"
+                 if a["unattributed"] else ""))
     if out["unbilled_customers"]:
         print(f"  {out['unbilled_customers']} customer(s) with AI cost and no revenue: {usd(out['unbilled_cost'])}")
     if out["heavy_share_pct"] is not None:
@@ -1043,6 +1080,72 @@ def run_margin(args, ledger):
               f" median AI cost per customer {usd(out['median_cost'])}")
     if out["unassigned_cost"]:
         print(f"  {usd(out['unassigned_cost'])} of AI spend named no customer (operating expense, not in margin)")
+
+
+def run_reprice(args, ledger):
+    revenue, _ = load_revenue(args, "reprice")
+    try:
+        out = reprice(ledger, args.month, revenue,
+                      with_built_in(env_config("QUARTER_PRICES")),
+                      config(args.prices) if args.prices else None,
+                      read_as_model(args.as_model), args.revenue_change)
+    except ValueError as e:
+        sys.exit(f"reprice: {e}")
+
+    def usd(micros):
+        return ("-$" if micros < 0 else "$") + usd_display(abs(micros))
+
+    def pct(value):
+        return "n/a" if value is None else f"{value:.1f}%"
+
+    if args.csv:
+        writer = csv.writer(sys.stdout)
+        keys = ("revenue", "ai_cost", "margin", "revenue_after", "ai_cost_after", "margin_after")
+        writer.writerow(["customer", *(f"{k}_usd" for k in keys), "margin_pct", "margin_pct_after", "turns_negative"])
+        for r in out["rows"]:
+            writer.writerow([r["customer"], *(usd(r[k]).replace("$", "") for k in keys),
+                             pct(r["margin_pct"]).rstrip("%"), pct(r["margin_pct_after"]).rstrip("%"),
+                             "yes" if r["turns_negative"] else ""])
+        return
+    print(f"{out['month']}: margin {usd(out['margin'])} {pct(out['margin_pct'])} now,"
+          f" {usd(out['margin_after'])} {pct(out['margin_pct_after'])} under this scenario")
+    print(f"  revenue {usd(out['revenue'])} -> {usd(out['revenue_after'])},"
+          f" AI cost {usd(out['ai_cost'])} -> {usd(out['ai_cost_after'])}")
+    print(f"  {out['calls_repriced']} call(s) repriced from their own tokens:"
+          f" {usd(out['repriced_before'])} -> {usd(out['repriced_after'])}")
+    if out["not_repriced"]:
+        print(f"  {usd(out['not_repriced'])} of the spend named has no tokens of its own or is paid by a"
+              " subscription: not repriced")
+    for r in out["rows"]:
+        flag = "  turns negative" if r["turns_negative"] else ""
+        print(f"  {r['customer']:<22} margin {pct(r['margin_pct']):>7} -> {pct(r['margin_pct_after']):>7}"
+              f"  AI {usd(r['ai_cost']):>11} -> {usd(r['ai_cost_after']):>11}{flag}")
+
+
+def run_commits(args, ledger):
+    try:
+        found = [standing(ledger, c, args.as_of) for c in read_commits(config(args.file))]
+    except ValueError as e:
+        sys.exit(f"commits: {e}")
+
+    def usd(micros):
+        return "$" + usd_display(micros)
+
+    if args.csv:
+        writer = csv.writer(sys.stdout)
+        keys = ("amount", "spent", "per_day", "projected", "shortfall", "overage")
+        writer.writerow(["vendor", "from", "to", *(f"{k}_usd" for k in keys), "days_left", "at_vendor_figures"])
+        for c in found:
+            writer.writerow([c["vendor"], c["from"], c["to"], *(usd_display(c[k]) for k in keys), c["days_left"],
+                             " ".join(c["at_vendor_figures"])])
+        return
+    for c in found:
+        print(f"{c['vendor']} {c['from']} to {c['to']}: committed {usd(c['amount'])}, spent {usd(c['spent'])}"
+              + (f" ({', '.join(c['at_vendor_figures'])} at the vendor's own figures)" if c["at_vendor_figures"] else ""))
+        print(f"  {usd(c['per_day'])} a day over the last 30 days, {c['days_left']} day(s) left:"
+              f" {usd(c['projected'])} by the end"
+              + (f", SHORT by {usd(c['shortfall'])}: paid for and not used" if c["shortfall"] else "")
+              + (f", over by {usd(c['overage'])}" if c["overage"] else ""))
 
 
 def run_outcomes(args, ledger):
@@ -1103,18 +1206,25 @@ def run_exceptions(args, ledger):
     writer.writerows(rows)
 
 
+def vendor_figures(vendor: str, file: str | None, month: str) -> tuple[dict[str, int], str] | None:
+    """The vendor's costs for the month and where they came from: a console CSV, else its
+    cost API with the admin key; None when neither is at hand."""
+    if file:
+        return read_costs(Path(file).read_text(), month), "file"
+    key = os.environ.get(KEY_ENV[vendor])
+    if not key:
+        return None
+    return fetch(vendor, key, month, os.environ.get(f"QUARTER_{vendor.upper()}_ADMIN_URL")), "api"
+
+
 def run_reconcile(args, ledger):
     where = args.file or f"the {args.vendor} cost API"
     try:
-        if args.file:
-            billed = read_costs(Path(args.file).read_text(), args.month)
-        else:
-            key = os.environ.get(KEY_ENV[args.vendor])
-            if not key:
-                sys.exit(f"reconcile: set {KEY_ENV[args.vendor]} to your {args.vendor} admin key,"
-                         " or pass --file with the cost export from the vendor's console")
-            billed = fetch(args.vendor, key, args.month,
-                           os.environ.get(f"QUARTER_{args.vendor.upper()}_ADMIN_URL"))
+        got = vendor_figures(args.vendor, args.file, args.month)
+        if got is None:
+            sys.exit(f"reconcile: set {KEY_ENV[args.vendor]} to your {args.vendor} admin key,"
+                     " or pass --file with the cost export from the vendor's console")
+        billed = got[0]
         seen, subscription = quarter_side(ledger, args.vendor, args.month)
     except (OSError, ValueError) as e:  # a bad month is a ValueError too
         sys.exit(f"reconcile: {where}: {e}")
@@ -1153,6 +1263,43 @@ def run_reconcile(args, ledger):
         print(f"  {subscription['calls']} call(s) went on a subscription and are recorded at $0"
               f" ({usd(subscription['list_cost'])} at list price): the subscription is billed apart"
               " from API usage, so they are in neither column")
+
+
+def run_close(args, ledger):
+    files = {}
+    for given in args.file:
+        vendor, _, path = given.partition("=")
+        if vendor not in VENDORS or not path:
+            sys.exit(f"close: --file {given}: give it as VENDOR=FILE, VENDOR one of {', '.join(VENDORS)}")
+        files[vendor] = path
+    try:
+        month_range(args.month)
+    except ValueError:
+        sys.exit(f"close: {args.month!r} is not YYYY-MM")
+    done = 0
+    for vendor in VENDORS:
+        try:
+            got = vendor_figures(vendor, files.get(vendor), args.month)
+            if got is None:
+                continue
+            seen, _ = quarter_side(ledger, vendor, args.month)
+        except (OSError, ValueError) as e:
+            sys.exit(f"close: {vendor}: {e}")
+        out = compare(got[0], seen, args.tolerance_pct)
+        record(ledger, vendor, args.month, got[1], out, args.by)
+        done += 1
+        t, flagged = out["total"], sum(1 for r in out["rows"] if r["flag"])
+        print(f"{vendor}: vendor ${usd_display(t['vendor'])}, Quarter ${usd_display(t['quarter'])},"
+              f" {flagged} model(s) flagged; recorded (see `reconcile --vendor {vendor}` for each model)")
+    missing = unreconciled(ledger, args.month)
+    for vendor in missing:
+        print(f"{vendor}: spent this month and not reconciled: set {KEY_ENV[vendor]} or pass --file {vendor}=FILE")
+    if done:
+        print(f"Accrual for what is not billed yet: quarter-ledger export --month {args.month} --unbilled")
+    elif not missing:
+        print(f"{args.month}: no spend with {' or '.join(VENDORS)} to reconcile")
+    if missing:
+        sys.exit(1)
 
 
 def run_mandate_keys(args, ledger):
@@ -1561,6 +1708,33 @@ def parser() -> argparse.ArgumentParser:
                         help=f"read revenue from Stripe: invoices paid that month ({STRIPE_KEY_ENV})")
     mg.add_argument("--csv", action="store_true")
 
+    rp = command("reprice", run_reprice, "margin by customer under new prices, a cheaper model or a revenue change")
+    month(rp)
+    source = rp.add_mutually_exclusive_group(required=True)
+    source.add_argument("--revenue", help="CSV of revenue that month: a customer column and an amount column")
+    source.add_argument("--stripe", action="store_true", help=f"revenue from Stripe ({STRIPE_KEY_ENV})")
+    rp.add_argument("--revenue-change", type=float, default=0.0, metavar="PCT",
+                    help="change what every customer pays by this percentage, such as 10 or -5")
+    rp.add_argument("--prices", help="vendor prices, in the gateway's price format; only the models listed are"
+                    " repriced, from each call's own tokens")
+    rp.add_argument("--as-model", action="append", default=[], metavar="VENDOR/FROM=TO",
+                    help="price one model's calls as another model of the same vendor")
+    rp.add_argument("--csv", action="store_true")
+
+    ct = command("commits", run_commits, "AI vendor commitments: spend against each, and the shortfall at today's pace")
+    ct.add_argument("file", help='commits.json: [{"vendor", "amount_usd", "from", "to"}], dates YYYY-MM-DD')
+    ct.add_argument("--as-of", type=date.fromisoformat, help="the day to measure from (default: today)")
+    ct.add_argument("--csv", action="store_true")
+
+    bd = command("board", run_board, "the month's AI spend and margin on one page, in Markdown")
+    month(bd)
+    source = bd.add_mutually_exclusive_group()
+    source.add_argument("--revenue", help="CSV of revenue that month, for margin")
+    source.add_argument("--stripe", action="store_true", help=f"revenue from Stripe ({STRIPE_KEY_ENV})")
+    bd.add_argument("--cost-centres", help="centres.json; a class dimension splits operating spend, such as R&D")
+    bd.add_argument("--commits", help="commits.json, as for commits: warns of a projected shortfall")
+    bd.add_argument("--projects", help="projects.json, as for capitalise: shows what moves to an asset")
+
     cn = command("connect", lambda a, ledger: sources.run(a, ledger, caps_from(a.caps)),
                  "book spend from where it already is (vendor cost APIs, LiteLLM, OpenRouter,"
                  " Cloudflare AI Gateway, CSV) as observed entries")
@@ -1575,6 +1749,14 @@ def parser() -> argparse.ArgumentParser:
     rc.add_argument("--tolerance-pct", type=float, default=2.0,
                     help="flag a model whose difference is over this share of the vendor's figure")
     rc.add_argument("--csv", action="store_true")
+
+    cl = command("close", run_close, "reconcile every vendor for the month and record each match"
+                 " in the audit chain, for the audit pack and margin at the vendor's own figures")
+    month(cl)
+    cl.add_argument("--file", action="append", default=[], metavar="VENDOR=FILE",
+                    help="a vendor's console cost export, instead of its admin key")
+    cl.add_argument("--tolerance-pct", type=float, default=2.0)
+    cl.add_argument("--as", dest="by", default=getpass.getuser(), help="who closes (default: your login name)")
 
     command("suggest", run_suggest, "what past approvals suggest: standing approvals, always-denied spend").add_argument(
         "--days", type=int, default=90)

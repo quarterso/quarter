@@ -10,6 +10,9 @@ export type MarginRow = {
   margin: number;
   margin_pct: number | null;
   test_mode: boolean;
+  // At the vendor's own figures, once `quarter-ledger close` has reconciled the month.
+  actual_cost?: number;
+  actual_margin?: number;
 };
 
 export type Settings = {url: string; key: string};

@@ -14,6 +14,7 @@ import statistics
 from collections import Counter
 from datetime import datetime
 
+from .reconcile import recorded, unreconciled
 from .store import Ledger
 
 # Articles 19(1) and 26(6) say logs are kept for "at least six months". Six calendar
@@ -97,6 +98,8 @@ def gather(
             "signed": sum(len(ledger.config_signers(h)) >= SIGNERS_NEEDED for h in configs),
         },
         "anchors": actions["anchor"],
+        "reconciled": sorted(recorded(ledger, span[0][:7])),
+        "unreconciled": unreconciled(ledger, span[0][:7]),
         "data": {"masked_values": dict(kinds), "calls_by_destination": places,
                  "feed_versions": feeds},
         "records": {
@@ -211,6 +214,11 @@ def warnings(facts: dict) -> list[str]:
             "No anchor was made this month (`quarter-ledger anchor`). Without chain heads held"
             " outside Quarter, a rewrite of the whole chain cannot be shown."
         )
+    if facts.get("unreconciled"):
+        out.append(
+            f"Spend with {', '.join(facts['unreconciled'])} this month has no reconciliation with the"
+            " vendor's own figures (`quarter-ledger close`)."
+        )
     exc = facts.get("exceptions")
     if exc and exc["count"] and not any(r["digest"] == exc["digest"] for r in exc["reviews"]):
         out.append(
@@ -285,6 +293,8 @@ def controls(facts: dict) -> list[dict]:
     signoff_line = (f"Config changes signed off by {SIGNERS_NEEDED} people: {sign.get('signed', 0)}"
                     f" of {sign.get('configs', 0)}")
     anchor_line = f"Anchors made this month (chain heads for holding outside Quarter): {facts.get('anchors', 0)}"
+    match_line = (f"Reconciled with the vendor's own figures: {', '.join(facts.get('reconciled') or []) or 'none'};"
+                  f" not reconciled: {', '.join(facts.get('unreconciled') or []) or 'none'}")
     coso = [
         _c("COSO", "P3", "Structures, owners and authority for each AI agent",
            [*reviews[:2], self_refused], ["controls.json", "approvals.csv", "audit_log.csv"]),
@@ -295,7 +305,8 @@ def controls(facts: dict) -> list[dict]:
         _c("COSO", "P11", "Technology controls: access and change over agent configuration",
            [people, changes, signoff_line], ["audit_log.csv", "caps.json"]),
         _c("COSO", "P13", "Relevant, complete and unaltered information",
-           [records, anchor_line], ["chain.json", "entries.csv", "audit_log.csv", "journal.csv"]),
+           [records, anchor_line, match_line],
+           ["chain.json", "entries.csv", "audit_log.csv", "journal.csv", "reconciliation.csv"]),
         _c("COSO", "P16", "Ongoing evaluation: overrides and escalations monitored",
            [exception_line, monitoring], ["exceptions.csv", "pauses.csv"]),
         _c("COSO", "P17", "Deficiencies evaluated and reviewed by a person",

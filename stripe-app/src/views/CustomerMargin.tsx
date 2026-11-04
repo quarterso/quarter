@@ -21,6 +21,11 @@ type State =
   | {status: 'failed'; message: string}
   | {status: 'ready'; rows: MarginRow[]};
 
+function marginText(r: MarginRow): string {
+  const margin = r.actual_margin ?? r.margin;
+  return r.revenue > 0 ? `${usd(margin)} (${((margin / r.revenue) * 100).toFixed(1)}%)` : usd(margin);
+}
+
 const CustomerMargin = ({environment}: ExtensionContextValue) => {
   const customer = environment.objectContext?.id;
   const [state, setState] = useState<State>({status: 'loading'});
@@ -78,16 +83,15 @@ const CustomerMargin = ({environment}: ExtensionContextValue) => {
                 <TableRow key={r.month}>
                   <TableCell>{r.month}</TableCell>
                   <TableCell align="right">{usd(r.revenue)}</TableCell>
-                  <TableCell align="right">{usd(r.ai_cost)}</TableCell>
-                  <TableCell align="right">
-                    {r.margin_pct === null ? usd(r.margin) : `${usd(r.margin)} (${r.margin_pct.toFixed(1)}%)`}
-                  </TableCell>
+                  <TableCell align="right">{usd(r.actual_cost ?? r.ai_cost)}</TableCell>
+                  <TableCell align="right">{marginText(r)}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
           </Table>
           <Box css={{font: 'caption', color: 'secondary'}}>
             Booked in Quarter as {state.rows[0].customer}. Revenue is invoices paid in the month, excluding tax.
+            AI cost is at the vendor's own figures for months Quarter has reconciled, else as Quarter recorded it.
           </Box>
         </Box>
       )}

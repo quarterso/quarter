@@ -13,7 +13,7 @@ import sqlite3
 import zipfile
 from datetime import UTC, datetime
 
-from . import approval_record, controls, receipts, register
+from . import approval_record, controls, receipts, reconcile, register
 from .export import journal
 from .rules import load_rules
 from .store import Ledger, month_range
@@ -40,6 +40,8 @@ exceptions.csv every exception of the month: held calls a person decided (approv
                holds, and config changes without sign-off by two people. Each review of
                this list is an exceptions_reviewed row in the audit log, with a digest of
                the list as it stood.
+reconciliation.csv each vendor's own cost figures for the month against Quarter's, by model,
+               as `close` recorded them (reconciled rows in the audit log), in micro-dollars.
 approval_record/
                the approval record for the month: approvals from every source
                (Quarter's own, Stripe, imports), each with its audit chain hash, and
@@ -114,6 +116,10 @@ def audit_pack(
         files["rules.json"] = json.dumps(rules, indent=2)
     files["journal.csv"] = journal(ledger, month)
     files["exceptions.csv"] = _csv(controls.exceptions(ledger, span), ["at", "kind", "subject", "detail"])
+    files["reconciliation.csv"] = _csv(
+        [(v, r["model"], r["vendor"], r["quarter"], d["source"], d["at"], d["by"])
+         for v, d in sorted(reconcile.recorded(ledger, month).items()) for r in d["rows"]],
+        ["vendor", "model", "vendor_micros", "quarter_micros", "source", "recorded_at", "recorded_by"])
     reviews = register.evidence(ledger, start, register_rule)
 
     chain = ledger.verify_chain()
