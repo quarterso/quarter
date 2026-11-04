@@ -91,6 +91,7 @@ from . import (
     approval_record,
     bills,
     cards,
+    controls,
     demo,
     forensics,
     incident,
@@ -1079,6 +1080,29 @@ def run_outcomes(args, ledger):
         print(f"  {out['idle_tasks']} task(s) spent {usd(out['idle_cost'])} and reported no outcome")
 
 
+def run_config_sign(args, ledger):
+    try:
+        config, signers = ledger.sign_config(args.by)
+    except ValueError as e:
+        sys.exit(f"config sign: {e}")
+    need = controls.SIGNERS_NEEDED - len(signers)
+    print(f"config {config[:16]} signed off by {', '.join(signers)}"
+          + (f"; {need} more person needed" if need > 0 else "; authorised"))
+
+
+def run_exceptions(args, ledger):
+    start, end = month_range(args.month)
+    span = (start.isoformat(), end.isoformat())
+    if args.review:
+        done = controls.review_exceptions(ledger, args.month, span, args.by)
+        print(f"{done['rows']} exception(s) for {args.month} reviewed by {done['by']}")
+        return
+    rows = controls.exceptions(ledger, span)
+    writer = csv.writer(sys.stdout)
+    writer.writerow(["at", "kind", "subject", "detail"])
+    writer.writerows(rows)
+
+
 def run_reconcile(args, ledger):
     where = args.file or f"the {args.vendor} cost API"
     try:
@@ -1513,6 +1537,15 @@ def parser() -> argparse.ArgumentParser:
     cp.add_argument("--expense-account", default="AI vendor costs")
     cp.add_argument("--revenue-cost-account", default="Cost of revenue: AI")
     cp.add_argument("--date-format", help="strftime format for the journal date")
+
+    cs = command("config-sign", run_config_sign, "sign off the caps and rules now in force;"
+                 " two different people make a change authorised")
+    cs.add_argument("--as", dest="by", default=getpass.getuser(), help="who signs (default: your login name)")
+
+    ex = command("exceptions", run_exceptions, "the month's exceptions as CSV, or --review to record a review")
+    month(ex)
+    ex.add_argument("--review", action="store_true", help="record that you reviewed them as they stand")
+    ex.add_argument("--as", dest="by", default=getpass.getuser(), help="who reviews (default: your login name)")
 
     oc = command("outcomes", run_outcomes, "cost per outcome: what agents' work produced, against its AI cost")
     month(oc)

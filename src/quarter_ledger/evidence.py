@@ -35,12 +35,17 @@ rules.json     the egress rules in force when this pack was made, if any: what a
                an upstream_call row in the audit log, and each tool call held in a
                model's reply a tool_held row.
 journal.csv    the month-end journal.
+exceptions.csv every exception of the month: held calls a person decided (approved ones
+               override the line), refused access and self-approvals, pauses, shadow-mode
+               holds, and config changes without sign-off by two people. Each review of
+               this list is an exceptions_reviewed row in the audit log, with a digest of
+               the list as it stood.
 approval_record/
                the approval record for the month: approvals from every source
                (Quarter's own, Stripe, imports), each with its audit chain hash, and
                its own README and chain.json. `quarter-ledger approvals verify` on
                this pack recomputes each row's hash from the file alone.
-controls.md    each AIUC-1 control, SOC 2 criterion and EU AI Act article next to the
+controls.md    each COSO principle, AIUC-1 control, SOC 2 criterion and EU AI Act article next to the
                evidence above,
                with counts and file names; controls.json holds the same as data.
                Its last section is the quarterly owner review of agents, for this
@@ -108,6 +113,7 @@ def audit_pack(
     if rules is not None:
         files["rules.json"] = json.dumps(rules, indent=2)
     files["journal.csv"] = journal(ledger, month)
+    files["exceptions.csv"] = _csv(controls.exceptions(ledger, span), ["at", "kind", "subject", "detail"])
     reviews = register.evidence(ledger, start, register_rule)
 
     chain = ledger.verify_chain()

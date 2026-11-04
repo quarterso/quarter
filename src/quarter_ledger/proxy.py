@@ -77,6 +77,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from . import (
     approval_record,
     bills,
+    controls,
     dashboard,
     forensics,
     issuing,
@@ -133,7 +134,7 @@ HOP_BY_HOP = {
 RESERVED = {  # first path segments the gateway answers itself, never a vendor's
     "dashboard", "approvals", "healthz", "costs", "audit",
     "forecast", "agents", "authorize", "settle", "slack", "tasks", "export", "audit-pack", "attribution",
-    "standing", "bills", "issuing", "openapi.json", "outcomes",
+    "standing", "bills", "issuing", "openapi.json", "outcomes", "config", "exceptions",
 }
 # Vendor endpoints that cost nothing: forwarded without a price, a hold or a charge.
 FREE_POSTS = ("v1/messages/count_tokens", "v1/responses/input_tokens")
@@ -925,6 +926,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._record(raw)
         if parts == ["outcomes"]:
             return self._outcome(raw)
+        if parts == ["config", "sign"]:
+            return self._sign_config()
+        if parts == ["exceptions", "review"]:
+            return self._review_exceptions()
         if parts[0] == "standing":
             return self._standing(parts, raw)
         if parts == ["attribution"]:
@@ -1189,6 +1194,29 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"id": cost_id})
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, ArithmeticError) as e:
             return self._json(400, {"error": f"bad request: {e}"})
+
+    def _sign_config(self):
+        """The signed-in person signs off the caps and rules now in force."""
+        if not self._allowed("finance"):
+            return None
+        try:
+            config, signers = self.gw.ledger.sign_config(self._person()[0])
+        except ValueError as e:
+            return self._json(409, {"error": str(e)})
+        return self._json(200, {"config": config, "signed_by": signers,
+                                "authorised": len(signers) >= controls.SIGNERS_NEEDED})
+
+    def _review_exceptions(self):
+        """The signed-in person records a review of ?month='s exceptions as they stand."""
+        if not self._allowed("finance"):
+            return None
+        month = self._month()
+        if month is None:
+            return None
+        start, end = month_range(month)
+        done = controls.review_exceptions(self.gw.ledger, month, (start.isoformat(), end.isoformat()),
+                                          self._person()[0])
+        return self._json(200, done)
 
     def _outcome(self, raw: bytes):
         """An agent reports what its task produced (outcomes.py). The task, customer and

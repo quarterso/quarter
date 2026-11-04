@@ -679,6 +679,26 @@ class Ledger:
         self.audit("config.changed", None, ", ".join(changed))
         return True
 
+    def sign_config(self, person: str) -> tuple[str, list[str]]:
+        """Sign off the config now in force (the latest recorded one) as person. Two different
+        people make a change authorised. Raises ValueError if there is none or they signed."""
+        with self._write():
+            row = self.db.execute(
+                "select hash from audit where action = 'config' order by id desc limit 1").fetchone()
+            if not row:
+                raise ValueError("no config has been recorded yet")
+            signed = self.config_signers(row[0])
+            if person in signed:
+                raise ValueError(f"{person} already signed off this config")
+            self._audit_row("config_signoff", person, json.dumps({"config": row[0], "by": person}))
+            return row[0], [*signed, person]
+
+    def config_signers(self, config_hash: str) -> list[str]:
+        """Who signed off the config recorded with this chain hash, in order."""
+        return [json.loads(d)["by"] for (d,) in self.db.execute(
+            "select detail from audit where action = 'config_signoff'"
+            " and json_extract(detail, '$.config') = ? order by id", (config_hash,))]
+
     def policy_ref(self) -> str | None:
         """The chain hash of the latest recorded config: which caps and rules were in force."""
         row = self.db.execute(

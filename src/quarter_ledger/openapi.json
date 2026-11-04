@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Quarter",
-    "version": "0.1.10",
+    "version": "0.1.11",
     "summary": "The gateway and ledger that decide and record what AI agents spend.",
     "description": "Quarter's own HTTP API, as served by `quarter-ledger serve` (proxy.py).\n\nAgents call vendors through `/{vendor}/{path}` and ask before paying on any rail with `POST /authorize`, then report with `POST /settle`. People read reports and decide approvals with their own key and role (viewer, approver, finance, admin; each may do all that the ones before it may). Amounts in responses are micro-dollars unless a field says `_usd`.\n\nErrors are JSON error objects carrying a message; their exact shape is not part of this description. Every response may carry the x-quarter-* headers listed under components.headers where they apply.\n\nOn every route: a body sent with `transfer-encoding` instead of `content-length` is answered 411; a bad length 400; a body over 8 MiB 413; a body over 64 KiB from a caller with no valid key 401. Ten wrong person keys from one address in five minutes lock it out (429) for the rest of that window.\n\nUnder a Quarter route's first segment, a method the route does not answer gets 405 with an `Allow` header (components/responses/E405), and a path that is no route gets 404; neither reaches a vendor.",
     "license": {
@@ -2231,6 +2231,139 @@
           },
           "403": {
             "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/config/sign": {
+      "post": {
+        "tags": [
+          "Finance"
+        ],
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "finance",
+        "summary": "Sign off the config now in force",
+        "description": "Finance role or above, posting from this site. Records that the signed-in person approved the caps and rules recorded last. Two different people make a change authorised; the audit pack warns about changes with fewer.",
+        "responses": {
+          "200": {
+            "description": "Signed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "config": {
+                      "type": "string",
+                      "description": "The audit chain hash of the config signed off."
+                    },
+                    "signed_by": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "authorised": {
+                      "type": "boolean",
+                      "description": "True once two different people signed."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
+          },
+          "409": {
+            "description": "No config recorded yet, or this person already signed it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/exceptions/review": {
+      "post": {
+        "tags": [
+          "Finance"
+        ],
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "finance",
+        "summary": "Review a month's exceptions",
+        "description": "Finance role or above, posting from this site. Records that the signed-in person reviewed the month's exceptions (decided holds, refusals, pauses, unsigned config changes) as they stand, with a digest. A review stops matching if an exception is added later. The list itself is exceptions.csv in the audit pack.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/month"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reviewed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "month": {
+                      "type": "string"
+                    },
+                    "by": {
+                      "type": "string"
+                    },
+                    "rows": {
+                      "type": "integer"
+                    },
+                    "digest": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A bad month.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
           },
           "429": {
             "$ref": "#/components/responses/E429"

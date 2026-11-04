@@ -1,4 +1,4 @@
-"""The controls map in the audit pack: each SOC 2 criterion, EU AI Act article and AIUC-1
+"""The controls map in the audit pack: each COSO principle, SOC 2 criterion, EU AI Act article and AIUC-1
 control an auditor may test, next to the evidence Quarter holds for the month, with counts and the
 pack files that hold it. Quarter provides evidence; it does not certify compliance.
 
@@ -8,6 +8,7 @@ checked against the AICPA text. AIUC-1 control ids and titles were checked again
 standard.aiuc-1.com (Q4 2026 update) on 2026-11-02.
 """
 
+import hashlib
 import json
 import statistics
 from collections import Counter
@@ -81,7 +82,21 @@ def gather(
             "select detail from audit where action = 'feed_applied' and at < ? order by id", span[1:]
         )
     ]
+    found = exceptions(ledger, span)
+    configs = [h for (h,) in db.execute(
+        "select hash from audit where action = 'config' and at >= ? and at < ?", span)]
     return {
+        "exceptions": {
+            "count": len(found),
+            "by_kind": dict(Counter(kind for _, kind, _, _ in found)),
+            "reviews": exception_reviews(ledger, span[0][:7]),
+            "digest": exceptions_digest(found),
+        },
+        "signoff": {
+            "configs": len(configs),
+            "signed": sum(len(ledger.config_signers(h)) >= SIGNERS_NEEDED for h in configs),
+        },
+        "anchors": actions["anchor"],
         "data": {"masked_values": dict(kinds), "calls_by_destination": places,
                  "feed_versions": feeds},
         "records": {
@@ -124,6 +139,54 @@ def gather(
     }
 
 
+EXCEPTION_ACTIONS = (*ACCESS_REFUSALS, "self_approval_refused", "review_refused", "would_hold")
+SIGNERS_NEEDED = 2
+
+
+def exceptions(ledger: Ledger, span: tuple[str, str]) -> list[tuple]:
+    """Every exception in the period, oldest first, as (at, kind, subject, detail): each held
+    call a person decided (approved ones are overrides of the line), each refused access or
+    self-approval, each pause, each shadow-mode hold, and each config change that does not
+    yet have two people's sign-off."""
+    db = ledger.db
+    out = [(at, "approval_" + ("approved" if status == "used" else status), agent,
+            f"{id_} {vendor} {estimate} decided by {by or '-'}: {reason}")
+           for at, status, agent, id_, vendor, estimate, by, reason in db.execute(
+               "select created_at, status, agent, id, vendor, estimate, decided_by, reason from approvals"
+               " where created_at >= ? and created_at < ? and status != 'pending'", span)]
+    marks = ",".join("?" * len(EXCEPTION_ACTIONS))
+    out += [(at, action, client or "", detail or "") for at, action, client, detail in db.execute(
+        f"select at, action, client, detail from audit where action in ({marks}) and at >= ? and at < ?",
+        (*EXCEPTION_ACTIONS, *span))]
+    out += [(at, "pause", agent + (f"/{task}" if task else ""), reason) for at, agent, task, reason in db.execute(
+        "select at, agent, task, reason from pauses where at >= ? and at < ?", span)]
+    for at, config in db.execute(
+            "select at, hash from audit where action = 'config' and at >= ? and at < ?", span).fetchall():
+        signed = ledger.config_signers(config)
+        if len(signed) < SIGNERS_NEEDED:
+            out.append((at, "config_unsigned", config[:16],
+                        f"signed off by {', '.join(signed) or 'nobody'}; {SIGNERS_NEEDED} people needed"))
+    return sorted(out)
+
+
+def exceptions_digest(rows: list[tuple]) -> str:
+    return hashlib.sha256(json.dumps(rows).encode()).hexdigest()
+
+
+def review_exceptions(ledger: Ledger, month: str, span: tuple[str, str], person: str) -> dict:
+    """Record that person reviewed the month's exceptions as they stand now."""
+    rows = exceptions(ledger, span)
+    detail = {"month": month, "by": person, "rows": len(rows), "digest": exceptions_digest(rows)}
+    ledger.audit("exceptions_reviewed", person, json.dumps(detail))
+    return detail
+
+
+def exception_reviews(ledger: Ledger, month: str) -> list[dict]:
+    return [json.loads(d) | {"at": at} for at, d in ledger.db.execute(
+        "select at, detail from audit where action = 'exceptions_reviewed'"
+        " and json_extract(detail, '$.month') = ? order by id", (month,))]
+
+
 def warnings(facts: dict) -> list[str]:
     out = []
     for table, result in facts["integrity"].items():
@@ -142,6 +205,23 @@ def warnings(facts: dict) -> list[str]:
         out.append(
             f"Retention is {days} days, under six months ({SIX_MONTHS_DAYS} days covers any"
             " six calendar months). Articles 19(1) and 26(6) ask for at least six months."
+        )
+    if facts["records"]["entries"] and not facts.get("anchors"):
+        out.append(
+            "No anchor was made this month (`quarter-ledger anchor`). Without chain heads held"
+            " outside Quarter, a rewrite of the whole chain cannot be shown."
+        )
+    exc = facts.get("exceptions")
+    if exc and exc["count"] and not any(r["digest"] == exc["digest"] for r in exc["reviews"]):
+        out.append(
+            f"The month's {exc['count']} exception(s) have no review that matches them as they"
+            " stand (`quarter-ledger exceptions --review`)."
+        )
+    sign = facts.get("signoff")
+    if sign and sign["signed"] < sign["configs"]:
+        out.append(
+            f"{sign['configs'] - sign['signed']} config change(s) this month lack sign-off by"
+            f" {SIGNERS_NEEDED} people (`quarter-ledger config-sign`)."
         )
     if facts["access"]["people"] is None:
         out.append(
@@ -196,7 +276,32 @@ def controls(facts: dict) -> list[dict]:
     feed = data["feed_versions"]
     feed = f"Quarter feed in force: version {feed[-1]}" if feed else "No Quarter feed in force"
 
-    return [
+    exc, sign = facts.get("exceptions") or {}, facts.get("signoff") or {}
+    reviewed = [r for r in exc.get("reviews", []) if r["digest"] == exc.get("digest")]
+    exception_line = (
+        f"Exceptions: {exc.get('count', 0)} ({_counts(exc.get('by_kind'))}); reviewed as they stand by:"
+        f" {', '.join(r['by'] for r in reviewed) or 'nobody'}"
+    )
+    signoff_line = (f"Config changes signed off by {SIGNERS_NEEDED} people: {sign.get('signed', 0)}"
+                    f" of {sign.get('configs', 0)}")
+    anchor_line = f"Anchors made this month (chain heads for holding outside Quarter): {facts.get('anchors', 0)}"
+    coso = [
+        _c("COSO", "P3", "Structures, owners and authority for each AI agent",
+           [*reviews[:2], self_refused], ["controls.json", "approvals.csv", "audit_log.csv"]),
+        _c("COSO", "P8", "Fraud risk from agents acting beyond their authority",
+           [monitoring, f"Access refusals: {refusals}"], ["pauses.csv", "audit_log.csv", "exceptions.csv"]),
+        _c("COSO", "P10", "Control activities: limits and human review in proportion to risk",
+           [approvals, self_refused], ["caps.json", "approvals.csv", "receipts.jsonl"]),
+        _c("COSO", "P11", "Technology controls: access and change over agent configuration",
+           [people, changes, signoff_line], ["audit_log.csv", "caps.json"]),
+        _c("COSO", "P13", "Relevant, complete and unaltered information",
+           [records, anchor_line], ["chain.json", "entries.csv", "audit_log.csv", "journal.csv"]),
+        _c("COSO", "P16", "Ongoing evaluation: overrides and escalations monitored",
+           [exception_line, monitoring], ["exceptions.csv", "pauses.csv"]),
+        _c("COSO", "P17", "Deficiencies evaluated and reviewed by a person",
+           [exception_line, signoff_line], ["exceptions.csv", "audit_log.csv"]),
+    ]
+    return coso + [
         _c("AIUC-1", "A006", "Prevent PII leakage", [masked], ["controls.json"]),
         _c("AIUC-1", "B006", "Prevent unauthorized AI agent actions", rules + calls,
            ["rules.json", "audit_log.csv", "approvals.csv"]),
@@ -288,12 +393,14 @@ def render(month: str, facts: dict, files: set[str]) -> tuple[str, str]:
         ("The EU AI Act articles bind high-risk AI systems. Whether yours is high-risk is"
          " yours to decide. Article text: Regulation (EU) 2024/1689, OJ L, 12.7.2024."
          " SOC 2 criterion names are paraphrased, not quoted. AIUC-1 ids and titles are"
-         " from its Q4 2026 update."),
+         " from its Q4 2026 update. COSO principles are the 17 of the 2013 Internal Control"
+         " Integrated Framework, as COSO's 2026 guidance on generative AI applies them; titles"
+         " are paraphrased."),
         "",
     ]
     if found:
         lines += ["## Warnings", ""] + [f"- {w}" for w in found] + [""]
-    for framework in ("AIUC-1", "SOC 2", "EU AI Act"):
+    for framework in ("COSO", "AIUC-1", "SOC 2", "EU AI Act"):
         lines += [f"## {framework}", ""]
         for c in mapped:
             if c["framework"] == framework:

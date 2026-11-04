@@ -65,7 +65,10 @@ def test_seeded_ledger_gives_expected_counts(tmp_path):
     assert facts["approvals"]["by_status"] == {"approved": 1, "denied": 1, "pending": 1}
     assert facts["approvals"]["decided_by"] == {"Ann": 2}
     assert facts["approvals"]["median_seconds_to_decision"] == 120
-    assert data["warnings"] == []
+    assert [w.split(" (")[0].split(".")[0] for w in data["warnings"]] == [
+        "The month's 10 exception(s) have no review that matches them as they stand",
+        "2 config change(s) this month lack sign-off by 2 people",
+    ]
 
     assert md.splitlines()[2].startswith("Quarter provides evidence for these controls. It does not certify")
     assert "### Art. 26(6): Deployer keeps logs at least six months" in md
@@ -138,3 +141,90 @@ def test_aiuc1_controls_sit_next_to_what_the_gateway_did(tmp_path):
     assert "Values masked before leaving for a model, by kind: card 1, email 3" in md
     assert {"A006", "B006", "B007", "C007", "C009", "D003", "E004", "E009", "E011", "E015"} <= {
         c["ref"] for c in data["controls"] if c["framework"] == "AIUC-1"}
+
+
+def test_signed_reviewed_and_anchored_month_has_no_warnings(tmp_path):
+    from quarter_ledger import anchor
+    from quarter_ledger.controls import review_exceptions
+    from quarter_ledger.store import month_range
+
+    ledger = Ledger(str(tmp_path / "l.db"))
+    ledger.record_config({"caps": []})
+    ledger.sign_config("Ann")
+    with pytest.raises(ValueError, match="already signed"):
+        ledger.sign_config("Ann")
+    ledger.sign_config("Fay")
+    ledger.record_config({"caps": [{"agent": "bot"}]})
+    ledger.sign_config("Ann")
+    caps = [Cap(scope="agent", key="bot", window="total", limit=100, approve_above=1)]
+    ledger.decide_approval(ledger.hold(caps, {"agent": "bot"}, "openai", "m", 5)[1], True, by="Ann")
+    out = str(tmp_path / "pack.zip")
+    first = audit_pack(ledger, MONTH, out, retention_days=2555, people=PEOPLE)
+    assert any("1 config change(s)" in w for w in first["warnings"])  # the second has one signer
+    ledger.sign_config("Fay")
+    anchor.make(ledger, str(tmp_path / "anchor.json"))
+    start, end = month_range(MONTH)
+    review_exceptions(ledger, MONTH, (start.isoformat(), end.isoformat()), "Fay")
+    summary = audit_pack(ledger, MONTH, out, retention_days=2555, people=PEOPLE)
+    assert summary["warnings"] == []
+    md, _ = read_pack(out)
+    rows = zipfile.ZipFile(out).read("exceptions.csv").decode().splitlines()
+    assert rows[0] == "at,kind,subject,detail" and ",approval_approved,bot," in rows[1]
+    assert "## COSO" in md and "### P11: Technology controls" in md
+    assert "Config changes signed off by 2 people: 2 of 2" in md
+    assert "reviewed as they stand by: Fay" in md
+
+
+def test_config_sign_and_exceptions_review_from_the_command_line(tmp_path, capsys):
+    from quarter_ledger.cli import main
+
+    db = str(tmp_path / "l.db")
+    ledger = Ledger(db)
+    with pytest.raises(SystemExit, match="no config has been recorded"):
+        main(["--db", db, "config-sign", "--as", "Ann"])
+    ledger.record_config({"caps": []})
+    main(["--db", db, "config-sign", "--as", "Ann"])
+    assert "signed off by Ann; 1 more person needed" in capsys.readouterr().out
+    main(["--db", db, "config-sign", "--as", "Fay"])
+    assert "signed off by Ann, Fay; authorised" in capsys.readouterr().out
+    caps = [Cap(scope="agent", key="bot", window="total", limit=100, approve_above=1)]
+    ledger.decide_approval(ledger.hold(caps, {"agent": "bot"}, "openai", "m", 5)[1], False, by="Ann")
+    month = ledger.db.execute("select substr(created_at, 1, 7) from approvals").fetchone()[0]
+    main(["--db", db, "exceptions", "--month", month])
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "at,kind,subject,detail" and ",approval_denied,bot," in lines[1]
+    main(["--db", db, "exceptions", "--month", month, "--review", "--as", "Fay"])
+    assert capsys.readouterr().out.strip() == f"1 exception(s) for {month} reviewed by Fay"
+
+
+def test_config_sign_and_exceptions_review_over_the_gateway(tmp_path):
+    import urllib.error
+    import urllib.request
+
+    from test_proxy import ADMIN_KEY, PRICES, start
+
+    from quarter_ledger.proxy import Gateway, serve
+
+    ledger = Ledger(str(tmp_path / "l.db"))
+    proxy = start(serve(Gateway(ledger, [], PRICES, {}, set(), ADMIN_KEY), port=0))
+
+    def post(path, key=ADMIN_KEY):
+        req = urllib.request.Request(f"http://127.0.0.1:{proxy.server_port}{path}", data=b"",
+                                     headers={"x-quarter-key": key} if key else {})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    try:
+        assert post("/config/sign", key=None)[0] == 401
+        ledger.record_config({"caps": []})
+        status, body = post("/config/sign")
+        assert status == 200 and body["authorised"] is False and len(body["signed_by"]) == 1
+        assert post("/config/sign")[0] == 409  # the same person cannot sign twice
+        status, body = post("/exceptions/review")
+        assert status == 200 and body["rows"] == 0 and body["digest"]
+        assert post("/exceptions/review?month=bad")[0] == 400
+    finally:
+        proxy.shutdown()

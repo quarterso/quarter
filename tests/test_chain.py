@@ -59,6 +59,7 @@ def test_audit_pack_zip(tmp_path):
     assert {
         "README.txt",
         "entries.csv",
+        "exceptions.csv",
         "approvals.csv",
         "audit_log.csv",
         "pauses.csv",
