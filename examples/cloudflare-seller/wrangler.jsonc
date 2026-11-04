@@ -1,0 +1,15 @@
+// Placeholders only. Fill these in for your own account; nothing here is real.
+{
+  "name": "cloudflare-seller",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-11-01",
+  // The verifier uses node:crypto and Buffer.
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "PAY_TO": "0xYourPayoutAddress",
+    "PRICE_MICROS": "10000",
+    "NETWORK": "eip155:84532",
+    "ASSET": "0xUsdcContractOnThatNetwork",
+    "FACILITATOR_URL": "https://facilitator.example.com"
+  }
+}

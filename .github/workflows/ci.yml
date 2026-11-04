@@ -29,3 +29,5 @@ jobs:
         working-directory: x402
       - run: node --test
         working-directory: x402
+      - run: node --test
+        working-directory: examples/cloudflare-seller

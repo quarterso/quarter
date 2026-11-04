@@ -19,7 +19,7 @@ From `quarter/memory/strategy/cheapest-running-2026-11-03.md` and `quarter/memor
 
 | Stage | Box | Per month |
 | --- | --- | --- |
-| Sandbox and design partners | Google Cloud e2-micro (1 GB), IPv6 only, in us-east1, us-central1 or us-west1 | $0 |
+| Sandbox and design partners | Oracle Cloud Always Free ARM (4 cores, 24 GB, public IPv4), running since 2026-11-03 | $0 |
 | First paying customers | DigitalOcean $4 (512 MB), then resize to 2 GB at about 10 customers | $4, then $12 |
 | About 50 customers | Two 4 GB boxes, about 25 tenants each, Litestream to B2 | about $48 |
 
@@ -29,7 +29,18 @@ From `quarter/memory/strategy/cheapest-running-2026-11-03.md` and `quarter/memor
 - Cloudflare Tunnel is free. R2 is free up to 10 GB and 1 million uploads a month; at about 10 customers move backups to B2.
 - **Why `sync-interval: 10s`:** R2 bills each upload (Class A, $4.50 per million past the free million). Litestream's default of 1 second can make 2.6 million uploads a month for one busy database, about $11.66. At 10 seconds the worst case is 259,200, about $1.17. A restore loses at most the last 10 seconds of calls; tell customers that.
 
-## First box
+## First box on Oracle (running)
+
+Google closed the founder's new billing accounts as "not in good standing" (D191), so the free box is on Oracle Cloud's Always Free tier instead. It has public IPv4, so the IPv6 traps below do not apply and Slack approvals work.
+
+- **Box:** `quarter-1`, `VM.Standard.A1.Flex` (4 OCPU, 24 GB, 100 GB boot volume), Ubuntu 24.04 aarch64, home region `us-phoenix-1`, availability domain 2 (domain 1 answered "Out of host capacity"). VCN `quarter`, subnet `quarter-public`, security list `quarter-ssh-only`: inbound TCP 22 only, password login off. Docker and unattended upgrades installed.
+- **Image:** build it for arm64 on a Mac with `docker build --platform linux/arm64 -t quarter-ledger:<sha>-arm64 .`. The pinned Caddy and cloudflared digests are multi-arch.
+- **Access:** `ssh quarter-1` (an entry in `~/.ssh/config` with key `~/.ssh/quarter_oci`). The OCI CLI uses `oci session authenticate` (browser, about an hour) and `OCI_CLI_AUTH=security_token`.
+- **Tunnel:** `quarter-hosted`, id `c159f744-fb83-4314-a94e-dfafde882781`. Only `sandbox.quarterfi.com` is routed so far (`cloudflared tunnel route dns quarter-hosted <tenant>.quarterfi.com`, one per tenant, rather than the wildcard).
+- **Running:** the sandbox, its mock and Caddy, with the nightly reset in root's crontab. Checked from outside: `/healthz` answers, a call with no key gets 401, a call with the sandbox key gets the canned reply. No Litestream yet: the sandbox is never backed up, and the first real tenant needs a bucket first.
+- **Reclaim risk:** Oracle may stop an Always Free machine that stays nearly idle for 7 days. Upgrading the account to Pay As You Go stops that and keeps Always Free resources free, but lets Oracle charge the card for anything else. Open in D191.
+
+## First box on Google Cloud (not used)
 
 The free e2-micro, from nothing. Steps marked **by hand** only the founder can do. Commands checked against Google's gcloud reference on 2026-11-03, not yet run.
 

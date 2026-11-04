@@ -1228,7 +1228,8 @@ def run_wallets(args, ledger):
     if args.wallets_command == "policy":
         payees = env_config("QUARTER_PAYEES", {})
         try:
-            doc = wallets.cdp_policy(caps_from(args.caps), payees, args.agent)
+            export = wallets.privy_policy if args.format == "privy" else wallets.cdp_policy
+            doc = export(caps_from(args.caps), payees, args.agent)
         except ValueError as e:
             sys.exit(f"wallets policy: {e}")
         if "x402" in payees and payees.get("unlisted", "approve") != "deny":
@@ -1610,7 +1611,7 @@ def parser() -> argparse.ArgumentParser:
     wc.add_argument("--rpc", default=os.environ.get("QUARTER_BASE_RPC", wallets.PUBLIC_RPC),
                     help="a Base JSON-RPC endpoint (default the public one, or QUARTER_BASE_RPC)")
     wp = wsub.add_parser("policy", help="a wallet policy that refuses what Quarter would refuse")
-    wp.add_argument("--format", choices=("cdp",), default="cdp")
+    wp.add_argument("--format", choices=("cdp", "privy"), default="cdp")
     wp.add_argument("--agent", help="an account policy for this agent's wallet, with its own caps")
     caps(wp)
 

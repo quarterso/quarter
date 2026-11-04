@@ -249,3 +249,71 @@ def test_cdp_policy_refuses_what_it_cannot_express(tmp_path, monkeypatch, capsys
     printed = capsys.readouterr()
     assert json.loads(printed.out)["rules"][0]["criteria"][1]["conditions"][1]["value"] == "40000000"
     assert "approve a payee off the list" in printed.err
+
+
+def test_privy_policy_document_shape():
+    doc = wallets.privy_policy(CAPS, {"x402": [EXA, PERPLEX], "unlisted": "deny"})
+    assert set(doc) == {"version", "name", "chain_type", "rules"}
+    assert (doc["version"], doc["chain_type"]) == ("1.0", "ethereum") and len(doc["name"]) <= 100
+    assert all(len(r["name"]) <= 50 for r in doc["rules"])
+    assert {r["action"] for r in doc["rules"]} == {"ALLOW"}  # Privy denies any method with no rule
+    typed, viem, send, sign = doc["rules"]
+    assert [r["method"] for r in doc["rules"]] == [
+        "eth_signTypedData_v4", "eth_signTypedData_v4", "eth_sendTransaction", "eth_signTransaction"]
+
+    domain = [{"field_source": "ethereum_typed_data_domain", "field": "chainId", "operator": "eq",
+               "value": "8453"},
+              {"field_source": "ethereum_typed_data_domain", "field": "verifyingContract",
+               "operator": "eq", "value": wallets.USDC}]
+    assert typed["conditions"][:2] == viem["conditions"][:2] == domain
+    message = typed["conditions"][2:]
+    assert [(c["field_source"], c["field"], c["operator"], c["value"]) for c in message] == [
+        ("ethereum_typed_data_message", "to", "in", [EXA, PERPLEX]),
+        ("ethereum_typed_data_message", "value", "lte", "500000000"),  # $500 in USDC units
+    ]
+    shape = message[0]["typed_data"]
+    assert shape["primary_type"] == "TransferWithAuthorization"
+    assert list(shape["types"]) == ["TransferWithAuthorization"]
+    assert [f["name"] for f in shape["types"]["TransferWithAuthorization"]] == [
+        "from", "to", "value", "validAfter", "validBefore", "nonce"]
+    with_domain = viem["conditions"][2]["typed_data"]["types"]
+    assert list(with_domain) == ["EIP712Domain", "TransferWithAuthorization"]
+    assert [f["name"] for f in with_domain["EIP712Domain"]] == [
+        "name", "version", "chainId", "verifyingContract"]
+
+    assert send["conditions"] == sign["conditions"]
+    tx, calldata = send["conditions"][:3], send["conditions"][3:]
+    assert tx == [
+        {"field_source": "ethereum_transaction", "field": "to", "operator": "eq", "value": wallets.USDC},
+        {"field_source": "ethereum_transaction", "field": "value", "operator": "lte", "value": "0"},
+        {"field_source": "ethereum_transaction", "field": "chain_id", "operator": "eq", "value": "8453"},
+    ]
+    assert [(c["field_source"], c["field"], c["operator"], c["value"]) for c in calldata] == [
+        ("ethereum_calldata", "transfer.to", "in", [EXA, PERPLEX]),
+        ("ethereum_calldata", "transfer.value", "lte", "500000000"),
+    ]
+    abi, = calldata[0]["abi"]
+    assert abi["name"] == "transfer" and [i["name"] for i in abi["inputs"]] == ["to", "value"]
+
+    own = wallets.privy_policy(CAPS, {}, agent="researcher")
+    assert own["name"].endswith("for researcher")
+    assert [(c["field"], c["value"]) for c in own["rules"][0]["conditions"][2:]] == [
+        ("value", "20000000")]
+    assert [(c["field"], c["value"]) for c in own["rules"][2]["conditions"][3:]] == [
+        ("transfer.value", "20000000")]
+
+
+def test_privy_policy_refuses_what_it_cannot_express(tmp_path, monkeypatch, capsys):
+    with pytest.raises(ValueError, match="nothing for the wallet to refuse"):
+        wallets.privy_policy([], {})
+    with pytest.raises(ValueError, match="not an address"):
+        wallets.privy_policy([], {"x402": ["acme.com"]})
+    with pytest.raises(ValueError, match="Privy takes 1 to 100"):
+        wallets.privy_policy([], {"x402": [EXA] * 101})
+
+    monkeypatch.setenv("QUARTER_PAYEES", json.dumps({"x402": [EXA]}))
+    main(["--db", str(tmp_path / "l.db"), "wallets", "policy", "--format", "privy",
+          "--caps", '[{"scope": "all", "limit_usd": "40"}]'])
+    printed = capsys.readouterr()
+    assert json.loads(printed.out)["rules"][0]["conditions"][3]["value"] == "40000000"
+    assert "approve a payee off the list" in printed.err

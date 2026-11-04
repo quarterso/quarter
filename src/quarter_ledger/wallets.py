@@ -5,8 +5,9 @@ Reconcile reads a month of USDC Transfer events out of the company's wallets on 
 a public JSON-RPC endpoint and matches them to the ledger's x402 settlements. USDC has
 6 decimals, so one on-chain unit is one micro-dollar and amounts compare as they are.
 
-The policy export writes a Coinbase Developer Platform (CDP) Policy Engine document from the
-caps and the x402 payee list. The company creates it in CDP itself; Quarter never calls CDP.
+The policy export writes a Coinbase Developer Platform (CDP) Policy Engine document, or a Privy
+wallet policy, from the caps and the x402 payee list. The company creates it there itself;
+Quarter never calls CDP or Privy.
 
 Sources, read 2026-11-03:
 - USDC on Base is 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913:
@@ -20,6 +21,13 @@ Sources, read 2026-11-03:
 - The policy document is the body of CDP's Create policy request:
   https://docs.cdp.coinbase.com/api-reference/v2/rest-api/policy-engine/create-policy
   https://docs.cdp.coinbase.com/wallets/security-and-policies/policy-engine/evm-policies
+- The Privy policy is the body of Privy's Create policy request:
+  https://docs.privy.io/api-reference/policies/create
+  https://docs.privy.io/controls/policies/overview
+  https://docs.privy.io/controls/policies/example-policies/ethereum
+  https://docs.privy.io/recipes/agent-integrations/x402-sanctions-screening
+  Address fields compare EVM addresses without regard to case:
+  https://docs.privy.io/controls/policies/template-variables
 - An x402 "exact" payment on EVM is a signed EIP-3009 TransferWithAuthorization:
   https://github.com/coinbase/x402/blob/main/specs/schemes/exact/scheme_exact_evm.md
 """
@@ -267,20 +275,27 @@ def largest_payment(caps: list[Cap], agent: str | None) -> int | None:
     return min(limits) if limits else None
 
 
-def cdp_policy(caps: list[Cap], payees: dict, agent: str | None = None) -> dict:
-    """A CDP Policy Engine document (the Create policy body) that accepts only USDC
-    payments on Base to the x402 payee list, each at most the largest payment Quarter
-    allows, and rejects signing raw hashes, which could authorise anything."""
+def payees_and_limit(caps: list[Cap], payees: dict, agent: str | None, wallet: str, most: int):
+    """The x402 payee list (None when there is none to enforce) and the largest payment,
+    checked against what the wallet's policy can hold: at most `most` addresses in a list."""
     allowed = payees.get("x402") if payees.get("mode") != "shadow" else None
     if allowed is not None:
         bad = [p for p in allowed if not ADDRESS.match(str(p))]
         if bad:
             raise ValueError(f"x402 payee is not an address: {bad[0]}")
-        if not 0 < len(allowed) <= 300:  # CDP allows 1 to 300 addresses in a criterion
-            raise ValueError(f"CDP takes 1 to 300 addresses in a list, not {len(allowed)}")
+        if not 0 < len(allowed) <= most:
+            raise ValueError(f"{wallet} takes 1 to {most} addresses in a list, not {len(allowed)}")
     limit = largest_payment(caps, agent)
     if allowed is None and limit is None:
         raise ValueError("no x402 payee list and no blocking cap: nothing for the wallet to refuse")
+    return allowed, limit
+
+
+def cdp_policy(caps: list[Cap], payees: dict, agent: str | None = None) -> dict:
+    """A CDP Policy Engine document (the Create policy body) that accepts only USDC
+    payments on Base to the x402 payee list, each at most the largest payment Quarter
+    allows, and rejects signing raw hashes, which could authorise anything."""
+    allowed, limit = payees_and_limit(caps, payees, agent, "CDP", 300)  # CDP allows 1 to 300
     typed, params = [], []
     if allowed is not None:
         typed.append({"addresses": allowed, "operator": "in", "path": "to"})
@@ -307,5 +322,63 @@ def cdp_policy(caps: list[Cap], payees: dict, agent: str | None = None) -> dict:
             ]},
             {"action": "accept", "operation": "signEvmTransaction", "criteria": usdc_transfer},
             {"action": "reject", "operation": "signEvmHash"},
+        ],
+    }
+
+
+# The ERC-20 transfer function, for decoding a USDC transfer's calldata.
+ERC20_TRANSFER = [{"type": "function", "name": "transfer", "stateMutability": "nonpayable",
+                   "inputs": [{"name": "to", "type": "address"}, {"name": "value", "type": "uint256"}],
+                   "outputs": [{"name": "", "type": "bool"}]}]
+# The types map viem adds when a WalletClient signs, for USDC's domain.
+EIP712_DOMAIN = [
+    {"name": "name", "type": "string"},
+    {"name": "version", "type": "string"},
+    {"name": "chainId", "type": "uint256"},
+    {"name": "verifyingContract", "type": "address"},
+]
+
+
+def privy_policy(caps: list[Cap], payees: dict, agent: str | None = None) -> dict:
+    """A Privy wallet policy (the Create policy body) that allows only USDC payments on
+    Base to the x402 payee list, each at most the largest payment Quarter allows. Privy
+    denies every method a policy has no rule for, so nothing else is signed."""
+    allowed, limit = payees_and_limit(caps, payees, agent, "Privy", 100)  # Privy's `in` takes 100
+    base = [{"field_source": "ethereum_typed_data_domain", "field": "chainId", "operator": "eq",
+             "value": "8453"},
+            {"field_source": "ethereum_typed_data_domain", "field": "verifyingContract",
+             "operator": "eq", "value": USDC}]
+    tx = [{"field_source": "ethereum_transaction", "field": "to", "operator": "eq", "value": USDC},
+          {"field_source": "ethereum_transaction", "field": "value", "operator": "lte", "value": "0"},
+          {"field_source": "ethereum_transaction", "field": "chain_id", "operator": "eq",
+           "value": "8453"}]
+    tests = []
+    if allowed is not None:
+        tests.append(("to", "in", allowed))
+    if limit is not None:
+        tests.append(("value", "lte", str(limit)))
+    calldata = [{"field_source": "ethereum_calldata", "field": f"transfer.{f}", "abi": ERC20_TRANSFER,
+                 "operator": op, "value": v} for f, op, v in tests]
+
+    def typed(types: dict) -> list[dict]:
+        shape = {"types": types, "primary_type": TRANSFER_WITH_AUTHORIZATION["primaryType"]}
+        return [{"field_source": "ethereum_typed_data_message", "typed_data": shape, "field": f,
+                 "operator": op, "value": v} for f, op, v in tests]
+
+    message = TRANSFER_WITH_AUTHORIZATION["types"]
+    name = "Quarter caps and x402 payee list" + (f" for {agent}" if agent else "")
+    return {
+        "version": "1.0",
+        "name": name[:100],
+        "chain_type": "ethereum",
+        "rules": [
+            {"name": "x402 payment in USDC on Base", "method": "eth_signTypedData_v4",
+             "action": "ALLOW", "conditions": base + typed(message)},
+            {"name": "x402 payment in USDC on Base, viem", "method": "eth_signTypedData_v4",
+             "action": "ALLOW", "conditions": base + typed({"EIP712Domain": EIP712_DOMAIN, **message})},
+            {"name": "USDC transfer on Base", "method": "eth_sendTransaction",
+             "action": "ALLOW", "conditions": tx + calldata},
+            {"name": "USDC transfer on Base", "method": "eth_signTransaction",
+             "action": "ALLOW", "conditions": tx + calldata},
         ],
     }
