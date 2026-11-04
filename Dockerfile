@@ -2,7 +2,7 @@
 FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
+COPY pyproject.toml uv.lock README.md LICENSE.md ./
 COPY src ./src
 # uv is mounted for this step only, so it is not in the image (28 MB). No cache is kept, and
 # the code is compiled now: the ledger user cannot write __pycache__ under /app at run time.
