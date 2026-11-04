@@ -81,7 +81,8 @@ def main() -> None:
     for step in range(1, a.steps + 1):
         status, reply = call(a.gateway, a.key, {"model": a.model, "messages": messages, "tools": TOOLS, "max_tokens": 400}, headers)
         if status != 200:
-            print(f"step {step}: Quarter answered {status}: {reply.get('error')} {reply.get('reason', '')}".rstrip())
+            error = reply.get("error")
+            print(f"step {step}: Quarter answered {status}: {error.get('message') if isinstance(error, dict) else error}")
             return
         message = reply["choices"][0]["message"]
         messages.append(message)

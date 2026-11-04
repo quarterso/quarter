@@ -35,7 +35,9 @@ def box(*tenants, **top):
 def test_example_renders_every_file(tmp_path):
     loaded = render.load((KIT / "tenants.example.json").read_text())
     written = render.render(loaded, tmp_path)
-    assert written == ["Caddyfile", "cloudflared.yml", "compose.yaml", "litestream.yml", "mock_upstream.py"]
+    recipient = ["backup-recipient.txt"] if (KIT / "backup-recipient.txt").exists() else []
+    assert written == sorted(["Caddyfile", "nightly_backup.py", "cloudflared.yml", "compose.yaml",
+                              "litestream.yml", "mock_upstream.py", *recipient])
     compose = (tmp_path / "compose.yaml").read_text()
     assert "env_file: env/acme.env" in compose and "mem_limit: 96m" in compose
     assert 'QUARTER_MAX_WAIT: "110"' in compose and "enable_ipv6: true" in compose
@@ -159,3 +161,105 @@ def test_sandbox_calls_through_the_gateway_are_priced(sandbox):
     assert kind.startswith("text/event-stream")
     charges = ledger.db.execute("select amount from entries where kind = 'charge'").fetchall()
     assert len(charges) == 2 and all(amount > 0 for (amount,) in charges)
+
+
+def test_sandbox_lists_models_and_relays_a_request_id_through_the_gateway(sandbox):
+    url, _, _ = sandbox
+    for headers, field in (({}, "object"), ({"anthropic-version": "2023-06-01"}, "has_more")):
+        req = urllib.request.Request(url + "/openai/v1/models", headers={"x-quarter-key": AGENT_KEY, **headers})
+        with urllib.request.urlopen(req, timeout=5) as reply:
+            body = json.loads(reply.read())
+            assert reply.headers["x-request-id"] == "req_sandbox"  # the SDKs read it from the vendor
+        assert field in body and "gpt-4o-mini" in [m["id"] for m in body["data"]]
+
+
+def test_secrets_backup_signs_s3_requests_like_aws(monkeypatch):
+    # AWS's published Signature Version 4 example key, so the signature is checkable by hand.
+    import datetime
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("nightly_backup", KIT / "nightly_backup.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    seen = {}
+
+    class Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake(req, timeout):
+        seen["url"], seen["headers"], seen["method"] = req.full_url, dict(req.header_items()), req.get_method()
+        return Resp()
+
+    monkeypatch.setattr(mod.urllib.request, "urlopen", fake)
+    env = {"LITESTREAM_ENDPOINT": "https://ns.compat.objectstorage.us-phoenix-1.oraclecloud.com",
+           "LITESTREAM_REGION": "us-phoenix-1", "LITESTREAM_BUCKET": "b",
+           "LITESTREAM_ACCESS_KEY_ID": "AKIDEXAMPLE", "LITESTREAM_SECRET_ACCESS_KEY": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"}
+    now = datetime.datetime(2026, 11, 3, 12, 0, tzinfo=datetime.UTC)
+    assert mod.s3("PUT", env, "secrets/2026-11-03.tar.age", b"sealed", now) == 200
+    assert seen["method"] == "PUT"
+    assert seen["url"] == "https://ns.compat.objectstorage.us-phoenix-1.oraclecloud.com/b/secrets/2026-11-03.tar.age"
+    auth = seen["headers"]["Authorization"]
+    assert auth.startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20261103/us-phoenix-1/s3/aws4_request, "
+                           "SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=")
+    assert "wJalr" not in auth
+
+
+def test_secrets_archive_leaves_out_the_databases(tmp_path, monkeypatch):
+    import importlib.util
+    import io
+    import tarfile
+    spec = importlib.util.spec_from_file_location("nightly_backup", KIT / "nightly_backup.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    (tmp_path / "env").mkdir()
+    (tmp_path / "env" / "acme.env").write_text("QUARTER_ADMIN_KEY=x\n")
+    vol = tmp_path / "vol"
+    (vol / ".ledger.db-litestream").mkdir(parents=True)
+    for name in ["ledger.db", "ledger.db-wal", "ledger.db-shm", "ledger.signing-key"]:
+        (vol / name).write_text("x")
+    monkeypatch.setattr(mod, "volumes", lambda: iter([("acme", vol)]))
+    monkeypatch.setattr(mod, "snapshot", lambda root, tenant: (vol / mod.COPY).write_text("checked copy"))
+    with tarfile.open(fileobj=io.BytesIO(mod.archive(tmp_path))) as tar:
+        names = tar.getnames()
+    assert names == ["env/acme.env", "volumes/acme/ledger.signing-key", "volumes/acme/nightly-backup.db"]
+    assert not (vol / mod.COPY).exists()  # the copy never stays on the box
+
+
+def test_nightly_pings_fail_when_an_upload_fails(tmp_path, monkeypatch):
+    import importlib.util
+    import io
+    spec = importlib.util.spec_from_file_location("nightly_backup", KIT / "nightly_backup.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    (tmp_path / "env").mkdir()
+    (tmp_path / "env" / "litestream.env").write_text("LITESTREAM_BUCKET=a\n")
+    (tmp_path / "env" / "b2.env").write_text("LITESTREAM_BUCKET=b\n")
+    (tmp_path / "env" / "healthchecks.env").write_text("HC_BACKUP_URL=https://hc-ping.example/u\n")
+    pinged, put = [], []
+    monkeypatch.setattr(mod, "archive", lambda root: b"tar")
+    monkeypatch.setattr(mod, "encrypt", lambda data, r: b"sealed")
+    monkeypatch.setattr(mod.urllib.request, "urlopen", lambda url, timeout: pinged.append(url) or io.BytesIO())
+
+    def s3(method, env, key, body=b""):
+        if method == "PUT":
+            put.append(env["LITESTREAM_BUCKET"])
+            if env["LITESTREAM_BUCKET"] == "b":
+                raise OSError("b2 down")
+    monkeypatch.setattr(mod, "s3", s3)
+    monkeypatch.setattr(mod.sys, "argv", ["x", str(tmp_path)])
+    try:
+        mod.main()
+    except OSError:
+        pass
+    assert put == ["a", "b"] and pinged == ["https://hc-ping.example/u/fail"]
+
+
+def test_free_plan_counts_decisions_and_paid_does_not():
+    loaded = render.load(box({"name": "acme", "tag": "t"}, {"name": "beta", "tag": "t", "plan": "paid"}))
+    compose = render.compose(loaded)
+    acme, beta = compose.split("  beta:")[0].split("  acme:")[1], compose.split("  beta:")[1]
+    assert f'QUARTER_FREE_DECISIONS: "{render.FREE_DECISIONS}"' in acme
+    assert "QUARTER_FREE_DECISIONS" not in beta
+    with pytest.raises(ValueError, match="plan must be"):
+        render.load(box({"name": "acme", "tag": "t", "plan": "gold"}))

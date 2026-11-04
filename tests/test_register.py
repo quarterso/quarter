@@ -131,7 +131,7 @@ def test_retired_agent_key_is_refused_at_the_gateway(gateway):  # noqa: F811
     url, ledger = gateway
     review(ledger, "2026-Q4", "a1", "Priya", keep=False, approvers=("Priya",))
     status, body = call(url + "/fake/v1/chat/completions", {"model": "m", "max_tokens": 1})
-    assert status == 423 and json.loads(body)["error"] == "agent_paused"
+    assert status == 423 and json.loads(body)["error"]["code"] == "agent_paused"
 
 
 def test_who_may_review(tmp_path):

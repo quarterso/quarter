@@ -143,7 +143,7 @@ def test_big_swipe_waits_for_a_person_and_the_retry_goes_through(cards):
 
 def test_unsigned_or_unconfigured_events_are_refused(cards, tmp_path):
     url, _ = cards
-    assert post(url, request(100), signature="t=1,v1=bad")[0] == 400
+    assert post(url, request(100), signature="t=1,v1=bad")[0] == 401
 
     bare = Gateway(Ledger(str(tmp_path / "b.db")), [], PRICES, {}, {AGENT_KEY}, ADMIN_KEY)
     server = start(serve(bare, port=0))

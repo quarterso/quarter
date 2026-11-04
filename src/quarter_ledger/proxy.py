@@ -131,6 +131,7 @@ HOP_BY_HOP = {
 RESERVED = {  # first path segments the gateway answers itself, never a vendor's
     "dashboard", "approvals", "healthz", "costs", "audit",
     "forecast", "agents", "authorize", "settle", "slack", "tasks", "export", "audit-pack", "attribution",
+    "standing", "bills", "issuing", "openapi.json",
 }
 # Vendor endpoints that cost nothing: forwarded without a price, a hold or a charge.
 FREE_POSTS = ("v1/messages/count_tokens", "v1/responses/input_tokens")
@@ -162,7 +163,38 @@ LEGACY_ADMIN = "admin"  # the name QUARTER_ADMIN_KEY signs in as
 UNCHECKED = object()
 VIEWER_ROUTES = {"/forecast", "/audit", "/approvals", "/bills", "/approvals/suggestions", "/standing"}
 FINANCE_DOWNLOADS = {"/export", "/audit-pack", "/approvals/export"}
+OPENAPI = Path(__file__).with_name("openapi.json")  # this API, described
 MONTH = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
+# A gateway call's own refusal is in its vendor's error shape, so the vendor's SDK raises a typed
+# error with a readable message. Quarter's code and detail stay in the error object.
+ERROR_TYPES = {
+    400: "invalid_request_error", 401: "authentication_error", 402: "billing_error", 403: "permission_error",
+    404: "not_found_error", 411: "invalid_request_error", 413: "request_too_large", 423: "permission_error",
+    429: "rate_limit_error",
+}
+REFUSALS = {  # what happened and what to do, for each refusal an agent can get
+    "cap_reached": "Quarter refused this call: {reason}. It did not reach the vendor. It can go once"
+                   " spend is back under the cap, or the cap is raised.",
+    "approval_required": "Quarter is holding this call for a person ({reason}). It did not reach the vendor."
+                         " Once approval {approval_id} is approved, send the same request again with the header"
+                         " x-quarter-approval: {approval_id}. Or send x-quarter-wait: <seconds> to wait for the decision.",
+    "approval_denied": "{decided_by} denied approval {approval_id}, so Quarter did not send this call.",
+    "agent_paused": "Quarter refused this call: {reason}. Its calls are refused until a person resumes the"
+                    " agent, on the dashboard or with quarter-ledger resume.",
+    "task_paused": "Quarter refused this call: {reason}. Its calls are refused until a person resumes the"
+                   " task, on the dashboard or with quarter-ledger resume --task.",
+    "rule_denied": "A Quarter rule refused this call ({rule}).",
+    "ledger_unavailable": "Quarter could not record this call, so it did not send it. Try again shortly.",
+}
+APPROVAL_STATUSES = {  # GET /approvals?status=, and the approvals each one lists
+    "pending": ("pending",), "approved": ("approved", "used"), "denied": ("denied",),
+    "all": ("pending", "approved", "used", "denied"),
+}
+# Quarter's own routes and their methods, from the spec: a wrong method is answered 405.
+ROUTES = [
+    (re.compile(re.sub(r"\\\{\w+\\\}", "[^/]+", re.escape(path))), set(methods) & {"get", "post", "put", "patch", "delete"})
+    for path, methods in json.loads(OPENAPI.read_text())["paths"].items() if not path.startswith("/{")
+]
 HTML_HEADERS = {
     "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
     "x-frame-options": "DENY",
@@ -786,16 +818,18 @@ class Handler(BaseHTTPRequestHandler):
         route, gw = urlsplit(self.path).path, self.gw
         if route == "/healthz":
             return self._json(200, {"ok": True})
+        if route == "/openapi.json":  # no secrets in it, so no key
+            return self._relay(200, "application/json", OPENAPI.read_bytes())
         if gw.locked_out(self._client()):
             return self._json(429, {"error": "too many wrong keys, try again later"})
         if route == "/dashboard":
             return self._dashboard()
         if route in FINANCE_DOWNLOADS:
             return self._download(route)
-        receipt = route.startswith("/approvals/") and route.endswith("/receipt")
+        receipt = route.startswith("/approvals/") and route.endswith("/receipt") and route.count("/") == 3
         why = route.startswith("/tasks/") and route.endswith("/why") and route.count("/") == 3
         if not (receipt or why or route in VIEWER_ROUTES):
-            return self._gateway(b"")
+            return self._unrouted(b"")
         if self._refused("viewer"):
             return None
         if why:
@@ -805,7 +839,7 @@ class Handler(BaseHTTPRequestHandler):
         if route == "/audit":
             return self._json(200, gw.ledger.audit_log())
         if route == "/approvals":
-            return self._json(200, gw.ledger.approvals())
+            return self._approvals()
         if route == "/approvals/suggestions":
             return self._json(200, learn.suggestions(gw.ledger))
         if route == "/standing":
@@ -818,7 +852,7 @@ class Handler(BaseHTTPRequestHandler):
         self._extra, self._who, self._vendor, self._redactor = {}, UNCHECKED, None, None
         raw = self._body()
         if raw is not None:
-            self._gateway(raw)
+            self._unrouted(raw)
 
     do_PATCH = do_DELETE = do_PUT
 
@@ -856,9 +890,12 @@ class Handler(BaseHTTPRequestHandler):
         parts = urlsplit(self.path).path.strip("/").split("/")
         if parts == ["approvals", "stripe"]:
             return self._stripe_approval(raw)
-        if parts[0] == "approvals":
+        if parts[0] == "approvals" and len(parts) == 3 and parts[2] in ("approve", "deny"):
             return self._decide(parts, raw)
-        if parts == ["slack", "actions"] and self.gw.slack:
+        if parts == ["slack", "actions"]:
+            if not self.gw.slack:
+                return self._json(503, {"error": "Slack approvals are not set up: set QUARTER_SLACK_BOT_TOKEN,"
+                                        " QUARTER_SLACK_SIGNING_SECRET and QUARTER_SLACK_CHANNEL"})
             return self._slack_action(raw)
         if parts[0] in ("agents", "tasks") and len(parts) == 3 and parts[2] == "resume":
             return self._resume(parts[0], unquote(parts[1]), raw)
@@ -866,7 +903,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._payment(parts[0], raw)
         if parts == ["issuing", "stripe"]:
             return self._card_event(raw)
-        if parts[0] == "costs":
+        if parts == ["costs"]:
             return self._record(raw)
         if parts[0] == "standing":
             return self._standing(parts, raw)
@@ -876,17 +913,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._bill(raw)
         if parts[0] == "bills" and len(parts) == 3 and parts[2] == "pay":
             return self._pay_bill(parts[1], raw)
-        self._gateway(raw)
+        self._unrouted(raw)
+
+    def _unrouted(self, raw: bytes):
+        """A path no Quarter route took. Under a Quarter route's first segment it is never a
+        vendor's: 405 when the path is a route for other methods, else 404."""
+        path = urlsplit(self.path).path
+        if path.strip("/").split("/")[0] not in RESERVED:
+            return self._gateway(raw)
+        allowed = sorted({m.upper() for template, methods in ROUTES if template.fullmatch(path) for m in methods})
+        if allowed:
+            self._extra["allow"] = ", ".join(allowed)
+            return self._json(405, {"error": f"{self.command} is not allowed here; use {' or '.join(allowed)}"})
+        return self._json(404, {"error": f"no Quarter route {path[:200]}"})
 
     # Finance
 
     def _dashboard(self):
         if self._person() is None:
-            self.send_response(401)
-            self.send_header("www-authenticate", 'Basic realm="Quarter"')
-            self.send_header("content-length", "0")
-            self.end_headers()
-            return
+            body = json.dumps({"error": "a person's key or the admin key is required"}).encode()
+            return self._relay(401, "application/json", body, {"www-authenticate": 'Basic realm="Quarter"'})
         name, role = self._person()
         month = self._month()
         if month is None:
@@ -984,6 +1030,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(409, {"error": "the map changed since you opened it; reload and try again"})
         self._done(True, raw)
 
+    def _approvals(self):
+        """?status=pending (the default), approved (used ones too), denied or all."""
+        wanted = parse_qs(urlsplit(self.path).query).get("status", ["pending"])[0]
+        if wanted not in APPROVAL_STATUSES:
+            return self._json(400, {"error": f"status is one of {', '.join(APPROVAL_STATUSES)}"})
+        found = [a for status in APPROVAL_STATUSES[wanted] for a in self.gw.ledger.approvals(status)]
+        return self._json(200, sorted(found, key=lambda a: a["created_at"]))
+
     def _receipt(self, approval_id: str):
         if not self.gw.signing_key:
             return self._json(503, {"error": "QUARTER_SIGNING_KEY is not set"})
@@ -1007,10 +1061,11 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return not self._refused(role)
 
-    def _done(self, ok: bool, raw: bytes):
-        """The dashboard's buttons go back to the dashboard; an API call gets JSON."""
+    def _done(self, ok: bool, raw: bytes, why: str = ""):
+        """The dashboard's buttons go back to the dashboard; an API call gets JSON, saying
+        `why` when nothing changed."""
         if b"form=1" not in raw:
-            return self._json(200 if ok else 409, {"ok": ok})
+            return self._json(200, {"ok": True}) if ok else self._json(409, {"ok": False, "error": why})
         self.send_response(303)
         self.send_header("location", "/dashboard")
         self.send_header("content-length", "0")
@@ -1023,13 +1078,11 @@ class Handler(BaseHTTPRequestHandler):
         ok = ledger.resume_task(name, by) if kind == "tasks" else ledger.resume(name, by)
         if ok:
             ledger.audit("resumed", self._actor(), f"task {name}" if kind == "tasks" else name)
-        self._done(ok, raw)
+        self._done(ok, raw, f"{kind[:-1]} {name[:64]} is not paused")
 
     def _decide(self, parts, raw):
         if not self._allowed("approver"):
             return
-        if len(parts) != 3 or parts[2] not in ("approve", "deny"):
-            return self._json(404, {"error": "use /approvals/{id}/approve or /deny"})
         by = self._person()[0]
         named = (self.headers.get("x-quarter-approver") or "").strip()[:64]
         if named and self._legacy_admin():
@@ -1044,7 +1097,9 @@ class Handler(BaseHTTPRequestHandler):
         if ok:
             self.gw.ledger.audit(parts[2], self._actor(), parts[1])
             self.gw.decided(parts[1])
-        self._done(ok, raw)
+        approval = None if ok else self.gw.ledger.approval(parts[1])
+        why = f"{parts[1][:64]} is already {approval['status']}" if approval else f"no approval {parts[1][:64]}"
+        self._done(ok, raw, why)
 
     def _slack_action(self, raw: bytes):
         """An Approve or Deny click. Slack wants a 200 within 3 seconds, so its
@@ -1097,6 +1152,8 @@ class Handler(BaseHTTPRequestHandler):
             amount = to_micros(body["amount_usd"])
             if amount <= 0:
                 return self._json(400, {"error": "amount_usd must be positive"})
+            if not MONTH.fullmatch(str(body["month"])):
+                return self._json(400, {"error": "month is YYYY-MM"})
             cost_id = ledger.add_cost(
                 category=body["category"],
                 vendor=body["vendor"],
@@ -1118,7 +1175,9 @@ class Handler(BaseHTTPRequestHandler):
             return None
         by = self._person()[0]
         if len(parts) == 3 and parts[2] == "revoke":
-            return self._json(200 if self.gw.ledger.revoke_standing(parts[1], by) else 404, {"id": parts[1]})
+            if self.gw.ledger.revoke_standing(parts[1], by):
+                return self._json(200, {"id": parts[1]})
+            return self._json(404, {"error": "no active standing approval with that id", "id": parts[1]})
         if len(parts) != 1:
             return self._json(404, {"error": "use /standing or /standing/{id}/revoke"})
         try:
@@ -1166,9 +1225,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": f"bad request: {e}"})
         if not isinstance(body, dict):
             return self._json(400, {"error": "bad request: send a JSON object"})
+        method, payment_method = body.get("method", "mercury"), body.get("payment_method", "ach")
+        if method not in ("mercury", "manual"):
+            return self._json(400, {"error": "method is mercury or manual"})
+        if method == "manual" and not body.get("ref"):
+            return self._json(400, {"error": "a manual payment needs the bank's reference"})
+        if method == "mercury" and payment_method not in bills.MERCURY_METHODS:
+            return self._json(400, {"error": f"payment_method is one of {', '.join(bills.MERCURY_METHODS)}"})
         try:
-            b = bills.pay(self.gw.ledger, self.gw.caps, bill_id, self._person()[0], body.get("method", "mercury"),
-                          body.get("ref"), self.gw.mercury, body.get("payment_method", "ach"))
+            b = bills.pay(self.gw.ledger, self.gw.caps, bill_id, self._person()[0], method,
+                          body.get("ref"), self.gw.mercury, payment_method)
         except KeyError as e:
             return self._json(404, {"error": str(e).strip("'")})
         except PermissionError as e:
@@ -1315,7 +1381,7 @@ class Handler(BaseHTTPRequestHandler):
         gw = self.gw
         if not self._agent_ok():
             return self._json(401, {"error": "agent key required"})
-        if not gw.signing_key:
+        if step == "authorize" and not gw.signing_key:  # settling signs nothing
             return self._json(503, {"error": "QUARTER_SIGNING_KEY is not set"})
         ids = self._ids()
         if ids is None:
@@ -1375,7 +1441,8 @@ class Handler(BaseHTTPRequestHandler):
             gw.announce_approval(ref, ids, rail, payee, amount, decision.reason)
             return self._approval_required(decision.reason, ref)
         token = authorisation(ref, ids, rail, payee, amount, gw.signing_key)
-        out = {"call_id": ref, "authorisation": token, "expires_in": AUTH_TTL}
+        out = {"call_id": ref, "authorisation": token, "authorization": token, "expires_in": AUTH_TTL}
+        self._extra["x-quarter-call"] = ref
         if decision.would_hold:  # authorised, but only because the rule is in shadow
             would = decision.would_hold
             out["shadow"] = {"would": would.outcome, "reason": would.reason}
@@ -1430,7 +1497,7 @@ class Handler(BaseHTTPRequestHandler):
         if not secret:
             return self._json(503, {"error": "QUARTER_STRIPE_APPROVALS_SECRET is not set"})
         if not issuing.verified(raw, self.headers.get("stripe-signature", ""), secret):
-            return self._json(400, {"error": "bad Stripe signature"})
+            return self._json(401, {"error": "bad Stripe signature"})
         try:
             event = json.loads(raw)
         except json.JSONDecodeError:
@@ -1445,7 +1512,7 @@ class Handler(BaseHTTPRequestHandler):
         if not gw.stripe_secret:
             return self._json(503, {"error": "QUARTER_STRIPE_SECRET is not set"})
         if not issuing.verified(raw, self.headers.get("stripe-signature", ""), gw.stripe_secret):
-            return self._json(400, {"error": "bad Stripe signature"})
+            return self._json(401, {"error": "bad Stripe signature"})
         try:
             event = json.loads(raw)
             auth = event["data"]["object"]
@@ -1509,14 +1576,14 @@ class Handler(BaseHTTPRequestHandler):
     def _gateway(self, raw: bytes):
         gw, url = self.gw, urlsplit(self.path)
         vendor, _, rest = url.path.lstrip("/").partition("/")
+        self._vendor = vendor  # so a refusal, even of an unknown vendor, is in a vendor's shape
         if not self._agent_ok():
-            return self._json(401, {"error": "agent key required"})
+            return self._json(401, {"error": "a Quarter agent key is required: send it as the API key, or in x-quarter-key"})
         plain = unquote(rest)  # a vendor decodes %2e%2e before resolving it
         if any(seg in ("..", ".") for seg in plain.split("/")) or "\\" in plain:
             return self._json(400, {"error": "bad path"})
         if vendor not in gw.upstreams:
             return self._json(404, {"error": f"unknown vendor {vendor}"})
-        self._vendor = vendor
         wait = self._wait()
         if wait is None:
             return None
@@ -1529,6 +1596,7 @@ class Handler(BaseHTTPRequestHandler):
             self._extra["x-quarter-upstream"] = route.to
         if not self._swap_vendor_key(vendor):
             env = VENDOR_KEY_ENV.get(self._vendor, "QUARTER_VENDOR_KEYS")
+            self._extra["x-should-retry"] = "false"  # the SDKs' own retries obey this
             return self._json(503, {"error": f"the gateway has no {self._vendor} key: set {env}"})
         if rest.startswith("v1/v1/"):  # a client base URL that already ends in /v1
             rest = rest[3:]
@@ -1685,6 +1753,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._extra["x-quarter-call"] = ref
                 self._extra["x-quarter-fail-open"] = "model"
                 return Decision("allow"), ref
+        self._extra["retry-after"] = "1"
         self._json(503, {"error": "ledger_unavailable"})
         return None, None
 
@@ -1869,6 +1938,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(502, {"error": f"vendor unreachable: {e}"})
         except upstream.Sent as e:  # the vendor may have done the work: charged, never resent
             settle(None, {})
+            self._extra["x-should-retry"] = "false"  # nor by the SDK, which would pay twice
             return self._json(502, {"error": f"vendor connection lost after the request was sent,"
                                              f" so it was not retried: {e}"})
 
@@ -1967,7 +2037,27 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, status: int, body) -> None:
+        if status >= 400 and isinstance(body, dict) and isinstance(body.get("error"), str):
+            body = self._vendor_error(status, body)
+        if status == 429:  # only a lockout: it lasts the rest of the window
+            self._extra |= {"retry-after": str(LOGIN_WINDOW), "x-should-retry": "false"}
         self._relay(status, "application/json", json.dumps(body).encode())
+
+    def _vendor_error(self, status: int, body: dict) -> dict:
+        """A gateway call's refusal in its vendor's error shape: OpenAI's, or Anthropic's for
+        /anthropic. Quarter's code and detail go in the error object, where each SDK keeps it, and
+        the detail stays beside it too (approval_id, reason). Other routes are as given."""
+        first = urlsplit(self.path).path.lstrip("/").partition("/")[0]
+        if getattr(self, "_vendor", None) is None and first not in self.gw.upstreams:
+            return body
+        error, detail = body["error"], {k: v for k, v in body.items() if k != "error"}
+        code = error if re.fullmatch(r"[a-z_]+", error) else None
+        said = "Quarter refused this call" if status < 500 else "Quarter could not complete this call"
+        message = REFUSALS[code].format_map(detail) if code in REFUSALS else f"{said}: {error}"
+        shaped = {"type": ERROR_TYPES.get(status, "api_error"), "message": message, "code": code, **detail}
+        if first.startswith("anthropic"):
+            return {"type": "error", "error": shaped, **detail}
+        return {"error": shaped, **detail}
 
     def log_message(self, *args):  # keep request logs out of stderr
         pass

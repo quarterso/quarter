@@ -410,7 +410,7 @@ def test_wait_is_capped_at_max_wait(gw):
     )
     with pytest.raises(urllib.error.HTTPError) as reply:
         urllib.request.urlopen(req, timeout=10)
-    assert reply.value.code == 403 and json.loads(reply.value.read())["error"] == "approval_required"
+    assert reply.value.code == 403 and json.loads(reply.value.read())["error"]["code"] == "approval_required"
     assert time.monotonic() - started < 5
     assert [a["status"] for a in ledger.approvals()] == ["pending"]
 

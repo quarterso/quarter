@@ -78,8 +78,8 @@ def test_stripe_events_are_recorded_once_each(gateway):
 def test_stripe_signature_age_and_secret_are_checked(gateway, tmp_path):
     url, gw = gateway
     raw = json.dumps(thin_event("approved")).encode()
-    assert post(url, thin_event("approved"), signed(raw, "whsec_wrong"))[0] == 400
-    assert post(url, thin_event("approved"), signed(raw, SECRET, int(time.time()) - 600))[0] == 400
+    assert post(url, thin_event("approved"), signed(raw, "whsec_wrong"))[0] == 401
+    assert post(url, thin_event("approved"), signed(raw, SECRET, int(time.time()) - 600))[0] == 401
     assert post(url, {"type": "v1.billing.meter.no_meter_found", "id": "evt_x"}) == (
         200, {"received": True, "recorded": False})
     assert approval_record.rows(gw.ledger) == []

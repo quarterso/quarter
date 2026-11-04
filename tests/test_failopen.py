@@ -86,8 +86,9 @@ def lines(gw):
 
 def test_default_is_closed(run):
     base, _ = run(fail_open=False)
-    status, _, body = call(base)
-    assert status == 503 and json.loads(body)["error"] == "ledger_unavailable"
+    status, headers, body = call(base)
+    assert status == 503 and json.loads(body)["error"]["code"] == "ledger_unavailable"
+    assert headers["retry-after"] == "1"  # the SDKs retry a 503 anyway: this says when
     assert Vendor.calls == 0
 
 

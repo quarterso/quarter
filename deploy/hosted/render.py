@@ -21,6 +21,7 @@ TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 RESERVED = {"caddy", "cloudflared", "litestream", "www"}  # services, and the website
 DEFAULT_MEMORY = "96m"
 MAX_WAIT = 110  # under Cloudflare's 125-second proxy read timeout
+FREE_DECISIONS = 10_000  # a month, on the free plan (D185); past it replies are marked, never refused (D190)
 CADDY = "caddy:2.11.7@sha256:36c24ad91a7ff7bc4c87fe22bfa8df3c4b18da0773d73fc12ee2c52b98c0bb7e"
 CLOUDFLARED = ("cloudflare/cloudflared:2026.10.7"
                "@sha256:4955524aeaa379e154023d5a027c250f7b35041a2e7e950cf13f144bc9b9c5ba")
@@ -36,7 +37,7 @@ SANDBOX_ENV = {
     "QUARTER_VENDOR_KEYS": json.dumps({"openai": "sandbox", "anthropic": "sandbox"}),
     "QUARTER_CAPS": json.dumps([
         {"scope": "agent", "key": "*", "window": "day", "limit_usd": "1", "approve_above_usd": "0.05"},
-        {"scope": "all", "window": "day", "limit_usd": "5"},
+        {"scope": "all", "window": "day", "limit_usd": "100"},  # high: every prospect shares it
     ]),
 }
 
@@ -69,6 +70,8 @@ def load(text: str) -> dict:
             raise ValueError(f"{name}: memory must look like 96m or 1g, not {t['memory']!r}")
         if t.setdefault("sandbox", False) not in (True, False):
             raise ValueError(f"{name}: sandbox must be true or false")
+        if t.setdefault("plan", "free") not in ("free", "paid"):
+            raise ValueError(f"{name}: plan must be free or paid")
     return box
 
 
@@ -103,6 +106,8 @@ def compose(box: dict) -> str:
         environment = {"QUARTER_MAX_WAIT": str(MAX_WAIT), "QUARTER_CLIENT_IP_HEADER": "cf-connecting-ip",
                        "QUARTER_DASHBOARD_URL": f"https://{name}.{box['domain']}"}
         environment |= SANDBOX_ENV if t["sandbox"] else {}
+        if t["plan"] == "free" and not t["sandbox"]:
+            environment["QUARTER_FREE_DECISIONS"] = str(FREE_DECISIONS)
         out += [
             f"  {name}:",
             f"    image: quarter-ledger:{t['tag']}",
@@ -178,6 +183,7 @@ def litestream(box: dict) -> str:
                 f"      path: {t['name']}",
                 "      endpoint: ${LITESTREAM_ENDPOINT}",
                 "      region: ${LITESTREAM_REGION}",
+                "      force-path-style: true",  # Oracle Object Storage needs it; R2 and B2 accept it
                 "      sync-interval: 10s",  # R2 bills each upload; see docs/HOSTED.md
             ]
     return "\n".join(out) + "\n"
@@ -201,6 +207,11 @@ def render(box: dict, out: Path) -> list[str]:
     if any(t["sandbox"] for t in box["tenants"]):
         shutil.copy(HERE / "mock_upstream.py", out / "mock_upstream.py")
         files["mock_upstream.py"] = ""
+    shutil.copy(HERE / "nightly_backup.py", out / "nightly_backup.py")
+    files["nightly_backup.py"] = ""
+    if (HERE / "backup-recipient.txt").exists():  # made by backup-key.sh; public
+        shutil.copy(HERE / "backup-recipient.txt", out / "backup-recipient.txt")
+        files["backup-recipient.txt"] = ""
     return sorted(files)
 
 

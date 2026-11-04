@@ -132,7 +132,7 @@ def test_cap_blocks_with_402(gateway):
     for _ in range(12):  # each about $0.0046 held, $0.002 charged; cap $0.05
         call(url + "/search/api", method="GET")
     status, body = call(url + "/search/api", method="GET")
-    assert status == 402 and json.loads(body)["error"] == "cap_reached"
+    assert status == 402 and json.loads(body)["error"]["code"] == "cap_reached"
 
 
 def test_agent_key_required(gateway):
@@ -236,7 +236,7 @@ def test_vendor_key_not_ours_passes_through(keyed_gateway):
 def test_agent_key_as_vendor_key_without_a_vendor_key_is_refused(keyed_gateway):
     url, ledger = keyed_gateway
     status, body = call(url + "/nokey/v1/chat", {"model": "m"}, {"x-api-key": AGENT_KEY})
-    assert status == 503 and "nokey" in json.loads(body)["error"]
+    assert status == 503 and "nokey" in json.loads(body)["error"]["message"]
     assert FakeVendor.calls == [] and ledger.totals("agent") == []
 
 
@@ -302,8 +302,9 @@ def test_dashboard_login_and_page(gateway):
 
 
 def test_reserved_vendor_names(tmp_path):
-    with pytest.raises(ValueError):
-        Gateway(Ledger(str(tmp_path / "l.db")), [], PRICES, {"dashboard": "http://x"})
+    for name in ("dashboard", "standing", "bills", "issuing", "openapi.json"):
+        with pytest.raises(ValueError):
+            Gateway(Ledger(str(tmp_path / "l.db")), [], PRICES, {name: "http://x"})
 
 
 def test_costs_through_the_gateway(gateway):
@@ -375,7 +376,7 @@ def test_behind_a_proxy_one_strangers_guesses_lock_out_only_the_stranger(gateway
     assert call(url + "/approvals", headers=stranger)[0] == 429
     finance = {"x-quarter-key": ADMIN_KEY, "x-forwarded-for": "198.51.100.1, 198.51.100.7"}
     assert call(url + "/approvals", headers=finance)[0] == 200
-    assert call(url + "/approvals", {}, finance)[0] == 404  # a POST still signs in
+    assert call(url + "/approvals/apr_x/approve", {}, finance)[0] == 409  # a POST still signs in
     failed = [r for r in ledger.audit_log() if r["action"] == "login_failed"]
     assert {r["client"] for r in failed} == {"203.0.113.9"}
     behind.shutdown()
@@ -517,7 +518,7 @@ def test_paused_agent_gets_423_until_resumed(gateway):
     url, ledger = gateway
     ledger.pause("a1", "spent $9 in 5 minutes")
     status, body = call(url + "/fake/v1/chat", {"model": "m", "max_tokens": 10})
-    assert status == 423 and json.loads(body)["error"] == "agent_paused"
+    assert status == 423 and json.loads(body)["error"]["code"] == "agent_paused"
     admin = {"x-quarter-key": ADMIN_KEY}
     assert call(url + "/agents/a1/resume", {}, admin)[0] == 200
     assert call(url + "/fake/v1/chat", {"model": "m", "max_tokens": 10})[0] == 200
@@ -689,7 +690,7 @@ def test_a_route_sends_one_customers_calls_to_another_upstream(tmp_path):
         # With no key of its own, a routed call is refused rather than sent the vendor's key.
         del gw.vendor_keys["fake-eu"]
         status, body = call(url, {"model": "m", "max_tokens": 10}, {**bearer, "x-quarter-customer": "eu-acme"})
-        assert status == 503 and "fake-eu" in json.loads(body)["error"]
+        assert status == 503 and "fake-eu" in json.loads(body)["error"]["message"]
     finally:
         proxy.shutdown()
         vendor.shutdown()
@@ -724,3 +725,206 @@ def test_spend_checks_run_on_one_background_thread_and_still_pause(tmp_path, mon
     assert "spent $10" in ledger.paused("bot") and ledger.paused("calm") is None
     assert len(threads) == 1 and threading.get_ident() not in threads
     assert len(checked) <= 30
+
+
+def answer(url, body=None, headers=HEADERS, method=None):
+    """The status, headers and JSON body of a call, refused or not."""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.status, resp.headers, json.loads(resp.read() or b"null")
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, json.loads(e.read() or b"null")
+
+
+def test_refusals_are_in_openais_error_shape_so_its_sdk_reads_them(gateway):
+    url, _ = gateway
+    for _ in range(12):
+        call(url + "/search/api", method="GET")
+    status, _, body = answer(url + "/search/api", method="GET")
+    assert status == 402 and body["reason"] == body["error"]["reason"]  # the detail stays beside it too
+    assert body["error"] == {
+        "type": "billing_error", "code": "cap_reached", "reason": body["reason"],
+        "message": f"Quarter refused this call: {body['reason']}. It did not reach the vendor. It can go"
+                   " once spend is back under the cap, or the cap is raised.",
+    }
+    big = {"model": "m", "max_tokens": 12_000}  # over the $0.02 approval line
+    status, _, body = answer(url + "/fake/v1/chat", big, {**HEADERS, "x-quarter-customer": "big"})
+    approval = body["approval_id"]
+    assert status == 403 and body["error"]["code"] == "approval_required" and body["error"]["approval_id"] == approval
+    assert body["error"]["type"] == "permission_error"
+    assert f"send the same request again with the header x-quarter-approval: {approval}" in body["error"]["message"]
+    status, _, body = answer(url + "/fake/v1/chat", {"model": "m"}, {})
+    assert status == 401 and body["error"]["type"] == "authentication_error" and body["error"]["code"] is None
+    assert body["error"]["message"].startswith("Quarter refused this call: a Quarter agent key is required")
+    status, _, body = answer(url + "/nope/v1/chat", {"model": "m"})
+    assert status == 404 and body["error"]["message"] == "Quarter refused this call: unknown vendor nope"
+
+
+def test_anthropic_calls_are_refused_in_anthropics_error_shape(keyed_gateway):
+    url, _ = keyed_gateway
+    status, _, body = answer(url + "/anthropic/v1/messages", {"model": "m"}, {"x-api-key": "wrong"})
+    assert status == 401 and body["type"] == "error" and body["error"]["type"] == "authentication_error"
+    assert "x-quarter-key" in body["error"]["message"]
+    assert "type" not in answer(url + "/fake/v1/chat", {"model": "m"}, {"x-api-key": "wrong"})[2]
+
+
+def test_quarters_own_routes_keep_their_own_error_shape(gateway):
+    url, _ = gateway
+    status, _, body = answer(url + "/approvals", headers={"x-quarter-key": "guess"})
+    assert status == 401 and body == {"error": "a person's key or the admin key is required"}
+
+
+def test_a_lockout_tells_the_sdk_not_to_retry_inside_the_window(gateway):
+    url, _ = gateway
+    for _ in range(10):
+        call(url + "/approvals", headers={"x-quarter-key": "guess"})
+    status, headers, body = answer(url + "/fake/v1/models", headers=HEADERS)
+    assert status == 429 and headers["retry-after"] == "300" and headers["x-should-retry"] == "false"
+    assert body["error"]["type"] == "rate_limit_error"
+
+
+def test_no_vendor_key_tells_the_sdk_not_to_retry(keyed_gateway):
+    url, _ = keyed_gateway
+    status, headers, _ = answer(url + "/nokey/v1/chat", {"model": "m"}, {"x-api-key": AGENT_KEY})
+    assert status == 503 and headers["x-should-retry"] == "false"
+
+
+class HangsUp(BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.rfile.read(int(self.headers["content-length"]))
+        self.close_connection = True  # no reply: the vendor may have done the work
+
+    def log_message(self, *args):
+        pass
+
+
+def test_a_vendor_that_hangs_up_is_charged_once_and_the_sdk_told_not_to_resend(tmp_path):
+    vendor = start(ThreadingHTTPServer(("127.0.0.1", 0), HangsUp))
+    ledger = Ledger(str(tmp_path / "l.db"))
+    gw = Gateway(ledger, [], PRICES, {"fake": f"http://127.0.0.1:{vendor.server_port}"}, {AGENT_KEY})
+    proxy = start(serve(gw, port=0))
+    try:
+        request = {"model": "m", "max_tokens": 10}
+        status, headers, body = answer(f"http://127.0.0.1:{proxy.server_port}/fake/v1/chat", request)
+        assert status == 502 and headers["x-should-retry"] == "false"
+        assert body["error"]["message"].startswith("Quarter could not complete this call: vendor connection lost")
+        assert spend(ledger) == len(json.dumps(request)) + 2 * 10  # the hold, in full: a resend would pay again
+    finally:
+        proxy.shutdown()
+        vendor.shutdown()
+
+
+def ask(url, method="GET", body=None, headers=HEADERS):
+    """answer(), with the method first."""
+    return answer(url, body, headers, method)
+
+
+def test_a_wrong_method_on_a_quarter_route_is_405_not_a_vendor(gateway):
+    url, _ = gateway
+    for method, path, allow in [("GET", "/authorize", "POST"), ("GET", "/costs", "POST"),
+                                ("POST", "/forecast", "GET"), ("POST", "/approvals", "GET"),
+                                ("PUT", "/bills", "GET, POST"), ("DELETE", "/standing", "GET, POST"),
+                                ("GET", "/approvals/apr_x/approve", "POST")]:
+        status, headers, body = ask(url + path, method, {} if method != "GET" else None)
+        assert (status, headers["allow"]) == (405, allow), (method, path)
+        assert method in body["error"] and "vendor" not in body["error"]
+    for path in ("/approvals/a/b/approve", "/costs/x", "/slack/other"):
+        status, _, body = ask(url + path, "POST", {})
+        assert status == 404 and "no Quarter route" in body["error"], path
+
+
+def test_slack_actions_without_slack_says_so(gateway):
+    url, _ = gateway
+    status, _, body = ask(url + "/slack/actions", "POST", {})
+    assert status == 503 and "Slack approvals are not set up" in body["error"]
+
+
+def test_settle_needs_no_signing_key(gateway):
+    url, ledger = gateway
+    status, _, body = ask(url + "/authorize", "POST", {"rail": "x402", "payee": "0xP", "amount_usd": "0.01"})
+    assert status == 503 and "QUARTER_SIGNING_KEY" in body["error"]
+    ids = {"agent": "a1", "task": None, "customer": "acme"}
+    _, ref = ledger.hold([], ids, "x402:0xP", "x402", to_micros("0.01"))
+    status, _, body = ask(url + "/settle", "POST", {"call_id": ref, "amount_micros": 10_000})
+    assert status == 200 and body["ok"] is True
+
+
+def test_refusals_use_the_error_object(gateway):
+    url, _ = gateway
+    admin = {"x-quarter-key": ADMIN_KEY}
+    status, _, body = ask(url + "/standing/std_nope/revoke", "POST", {}, admin)
+    assert status == 404 and body["id"] == "std_nope" and body["error"]
+
+    approval = json.loads(call(url + "/fake/v1/chat", {"model": "m", "max_tokens": 12_000})[1])["approval_id"]
+    assert ask(url + f"/approvals/{approval}/approve", "POST", {}, admin)[0] == 200
+    status, _, body = ask(url + f"/approvals/{approval}/deny", "POST", {}, admin)
+    assert status == 409 and body == {"ok": False, "error": f"{approval} is already approved"}
+    status, _, body = ask(url + "/approvals/apr_nope/approve", "POST", {}, admin)
+    assert status == 409 and body["error"] == "no approval apr_nope"
+    status, _, body = ask(url + "/agents/a1/resume", "POST", {}, admin)
+    assert status == 409 and body == {"ok": False, "error": "agent a1 is not paused"}
+
+    status, headers, body = ask(url + "/dashboard", headers={})
+    assert status == 401 and headers["www-authenticate"] == 'Basic realm="Quarter"' and body["error"]
+
+
+def test_costs_month_is_checked(gateway):
+    url, ledger = gateway
+    admin = {"x-quarter-key": ADMIN_KEY}
+    for month in ("2026-13", "Oct 2026", "2026-1", 202610):
+        status, _, body = ask(url + "/costs", "POST", {**COST, "month": month}, admin)
+        assert status == 400 and "YYYY-MM" in body["error"], month
+    assert ledger.costs_in("2026-10") == []
+
+
+def test_receipt_path_has_exactly_one_id(tmp_path):
+    ledger = Ledger(str(tmp_path / "l.db"))
+    caps = [Cap("agent", "*", "day", to_micros(100), approve_above=to_micros("0.02"))]
+    gw = Gateway(ledger, caps, PRICES, {}, {AGENT_KEY}, ADMIN_KEY, signing_key="s" * 32)
+    server = start(serve(gw, port=0))
+    try:
+        url, admin = f"http://127.0.0.1:{server.server_port}", {"x-quarter-key": ADMIN_KEY}
+        pay = {"rail": "x402", "payee": "0xP", "amount_usd": "0.5"}
+        approval = json.loads(call(url + "/authorize", pay)[1])["approval_id"]
+        ledger.decide_approval(approval, True, "dana")
+        assert ask(url + f"/approvals/{approval}/receipt", headers=admin)[0] == 200
+        status, _, body = ask(url + f"/approvals/{approval}/extra/receipt", headers=admin)
+        assert status == 404 and "receipt" not in body
+    finally:
+        server.shutdown()
+
+
+def test_approvals_listed_by_status(gateway):
+    url, ledger = gateway
+    admin = {"x-quarter-key": ADMIN_KEY}
+    big = {"model": "m", "max_tokens": 12_000}
+    first, second, third = (json.loads(call(url + "/fake/v1/chat", big)[1])["approval_id"] for _ in range(3))
+    ledger.decide_approval(first, True, "dana")
+    ledger.decide_approval(second, False, "dana")
+
+    def listed(query=""):
+        status, _, body = ask(url + "/approvals" + query, headers=admin)
+        assert status == 200
+        return [(a["id"], a["status"]) for a in body]
+
+    assert listed() == listed("?status=pending") == [(third, "pending")]
+    assert listed("?status=approved") == [(first, "approved")]
+    assert listed("?status=denied") == [(second, "denied")]
+    assert {a for a, _ in listed("?status=all")} == {first, second, third}
+    assert ask(url + "/approvals?status=used", headers=admin)[0] == 400
+
+
+def test_authorize_answers_both_spellings_and_the_call_header(tmp_path):
+    ledger = Ledger(str(tmp_path / "l.db"))
+    gw = Gateway(ledger, [], PRICES, {}, {AGENT_KEY}, ADMIN_KEY, signing_key="s" * 32)
+    server = start(serve(gw, port=0))
+    try:
+        url = f"http://127.0.0.1:{server.server_port}"
+        pay = {"rail": "x402", "payee": "0xP", "amount_usd": "0.25"}
+        status, headers, body = ask(url + "/authorize", "POST", pay)
+        assert status == 200 and body["authorization"] == body["authorisation"]
+        assert headers["x-quarter-call"] == body["call_id"]
+    finally:
+        server.shutdown()

@@ -1,0 +1,4163 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Quarter",
+    "version": "0.1.7",
+    "summary": "The gateway and ledger that decide and record what AI agents spend.",
+    "description": "Quarter's own HTTP API, as served by `quarter-ledger serve` (proxy.py).\n\nAgents call vendors through `/{vendor}/{path}` and ask before paying on any rail with `POST /authorize`, then report with `POST /settle`. People read reports and decide approvals with their own key and role (viewer, approver, finance, admin; each may do all that the ones before it may). Amounts in responses are micro-dollars unless a field says `_usd`.\n\nErrors are JSON error objects carrying a message; their exact shape is not part of this description. Every response may carry the x-quarter-* headers listed under components.headers where they apply.\n\nOn every route: a body sent with `transfer-encoding` instead of `content-length` is answered 411; a bad length 400; a body over 8 MiB 413; a body over 64 KiB from a caller with no valid key 401. Ten wrong person keys from one address in five minutes lock it out (429) for the rest of that window.\n\nUnder a Quarter route's first segment, a method the route does not answer gets 405 with an `Allow` header (components/responses/E405), and a path that is no route gets 404; neither reaches a vendor.",
+    "license": {
+      "name": "Proprietary",
+      "url": "https://quarterfi.com"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8780",
+      "description": "quarter-ledger serve, default"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Health",
+      "description": "Liveness and this description."
+    },
+    {
+      "name": "Payments",
+      "description": "Authorise before paying on any rail, settle after."
+    },
+    {
+      "name": "Approvals",
+      "description": "Calls and payments that wait for a person."
+    },
+    {
+      "name": "Finance",
+      "description": "Reports, costs, forecasts and the close files."
+    },
+    {
+      "name": "Bills",
+      "description": "Bill pay from the company's own account."
+    },
+    {
+      "name": "Webhooks",
+      "description": "Signed events from Slack and Stripe."
+    },
+    {
+      "name": "Gateway",
+      "description": "Vendor passthrough."
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "Liveness",
+        "description": "No auth, and answered even to a locked-out address.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The gateway is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    }
+                  },
+                  "required": [
+                    "ok"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "tags": [
+          "Health"
+        ],
+        "summary": "This description",
+        "description": "No auth: it holds no secrets.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI 3.1 description of Quarter's own API.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/authorize": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Authorise a payment before making it",
+        "description": "The decision API that x402 clients and other rail adapters call. Quarter applies caps, approval limits, pauses, payee lists, the feed's payee flags and sanctions screening, holds the amount, and answers with a signed authorisation valid for `expires_in` seconds. No money passes through Quarter. With `x-quarter-wait` a payment that needs approval waits for the decision instead of answering 403 at once; approved while waiting, it is authorised. Retry a payment that needed approval with `x-quarter-approval`. Counted as a decision against QUARTER_FREE_DECISIONS.",
+        "security": [
+          {
+            "agentKey": []
+          },
+          {
+            "agentBearer": []
+          },
+          {
+            "agentApiKey": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/agent"
+          },
+          {
+            "$ref": "#/components/parameters/task"
+          },
+          {
+            "$ref": "#/components/parameters/customer"
+          },
+          {
+            "$ref": "#/components/parameters/approval"
+          },
+          {
+            "$ref": "#/components/parameters/wait"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "rail",
+                  "payee"
+                ],
+                "properties": {
+                  "rail": {
+                    "type": "string",
+                    "enum": [
+                      "card",
+                      "invoice",
+                      "mpp",
+                      "other",
+                      "x402"
+                    ]
+                  },
+                  "payee": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Who is paid, e.g. an 0x address."
+                  },
+                  "amount_usd": {
+                    "type": [
+                      "string",
+                      "number"
+                    ],
+                    "description": "US dollars, for example \"0.25\". Used when amount_micros is absent."
+                  },
+                  "amount_micros": {
+                    "type": "integer",
+                    "description": "Micro-dollars (1 USD = 1,000,000). Takes precedence over amount_usd."
+                  },
+                  "network": {
+                    "type": "string",
+                    "description": "The x402 network, for the feed's price check."
+                  },
+                  "resource": {
+                    "type": "string",
+                    "description": "The URL paid for, for the feed's price check."
+                  }
+                },
+                "description": "One of amount_micros or amount_usd is required; positive, at most $1 billion."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Authorised and held.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "call_id",
+                    "authorisation",
+                    "expires_in",
+                    "authorization"
+                  ],
+                  "properties": {
+                    "call_id": {
+                      "type": "string",
+                      "description": "The hold; pass it to /settle."
+                    },
+                    "authorisation": {
+                      "type": "string",
+                      "description": "A signed token (JWT) naming the agent, rail, payee and max_amount_micros."
+                    },
+                    "authorization": {
+                      "type": "string",
+                      "description": "The same token as authorisation, under the US spelling of the path. authorisation stays for clients that read it."
+                    },
+                    "expires_in": {
+                      "type": "integer",
+                      "const": 600
+                    },
+                    "shadow": {
+                      "type": "object",
+                      "description": "Present when a rule in shadow mode would have held it.",
+                      "properties": {
+                        "would": {
+                          "type": "string",
+                          "enum": [
+                            "block",
+                            "approve"
+                          ]
+                        },
+                        "reason": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "mandate": {
+                      "type": "string",
+                      "description": "A spend mandate for the seller, when QUARTER_ORG is set and the signing key is ed25519. Sent in the x402 payment as the company-policy extension."
+                    }
+                  }
+                }
+              }
+            },
+            "headers": {
+              "x-quarter-call": {
+                "$ref": "#/components/headers/x-quarter-call"
+              },
+              "x-quarter-shadow": {
+                "$ref": "#/components/headers/x-quarter-shadow"
+              },
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            }
+          },
+          "400": {
+            "description": "Bad JSON, an unknown rail, no payee, a non-positive amount, an amount over $1 billion, or a bad x-quarter-wait.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An agent key is configured and none was sent.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Over a cap. Retrying will not help until the window resets or the cap changes.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused: the payee is not allowed, a sanctions match, the approval was denied, the agent key belongs to another agent, or an approval is required (the body carries the approval id; retry with x-quarter-approval once a person approves).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The agent or the task is paused.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "QUARTER_SIGNING_KEY is not set.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/settle": {
+      "post": {
+        "tags": [
+          "Payments"
+        ],
+        "summary": "Report what was really paid",
+        "description": "The hold made by /authorize becomes the real charge. Settling 0 releases it. Paying more than authorised is recorded and audited as over_authorised. With `x402_response` (the PAYMENT-RESPONSE header the agent got back) the transaction and network are read from it, and a failed payment settles at 0. Only the agent that authorised may settle.",
+        "security": [
+          {
+            "agentKey": []
+          },
+          {
+            "agentBearer": []
+          },
+          {
+            "agentApiKey": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/agent"
+          },
+          {
+            "$ref": "#/components/parameters/task"
+          },
+          {
+            "$ref": "#/components/parameters/customer"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "call_id"
+                ],
+                "properties": {
+                  "call_id": {
+                    "type": "string"
+                  },
+                  "amount_usd": {
+                    "type": [
+                      "string",
+                      "number"
+                    ],
+                    "description": "US dollars, for example \"0.25\". Used when amount_micros is absent."
+                  },
+                  "amount_micros": {
+                    "type": "integer",
+                    "description": "Micro-dollars (1 USD = 1,000,000). Takes precedence over amount_usd."
+                  },
+                  "tx": {
+                    "type": "string",
+                    "description": "The rail's transaction reference."
+                  },
+                  "x402_response": {
+                    "type": "string",
+                    "description": "The base64 PAYMENT-RESPONSE header."
+                  }
+                },
+                "description": "One of amount_micros or amount_usd is required, and not negative."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Settled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "over_authorised"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "over_authorised": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad JSON, a bad or negative amount, or a bad x402_response.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An agent key is configured and none was sent.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The agent key belongs to another agent.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No payment authorised for this agent with that call_id (bills settle when paid).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already settled.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/approvals": {
+      "get": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Approvals, pending by default",
+        "description": "Oldest first. `?status=` picks which: pending (the default), approved (used ones too), denied or all.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "viewer",
+        "responses": {
+          "200": {
+            "description": "The approvals asked for.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Approval"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          },
+          "400": {
+            "description": "An unknown status.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "approved",
+                "denied",
+                "all"
+              ],
+              "default": "pending"
+            }
+          }
+        ]
+      }
+    },
+    "/approvals/suggestions": {
+      "get": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Standing approvals to suggest",
+        "description": "Read from the last 90 days of decisions. Nothing changes until a person accepts.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "viewer",
+        "responses": {
+          "200": {
+            "description": "Suggestions.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "days": {
+                      "type": "integer"
+                    },
+                    "decisions": {
+                      "type": "integer"
+                    },
+                    "median_wait_minutes": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "would_not_ask": {},
+                    "suggestions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/approvals/export": {
+      "get": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "The approvals record (zip)",
+        "description": "Every approval, Quarter's own and imported, with its chain hash. Audited as download. Refused cross-site.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "finance",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/month"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Zip"
+          },
+          "400": {
+            "description": "A bad month.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/approvals/{id}/receipt": {
+      "get": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Signed receipt for a decided approval",
+        "description": "A JWT (HS256, or EdDSA with an ed25519 key) saying what the agent was allowed and who decided.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "viewer",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/approvalId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The receipt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "receipt": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "receipt"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No decided approval with that id.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "QUARTER_SIGNING_KEY is not set.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/approvals/{id}/approve": {
+      "post": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Approve an approval",
+        "description": "Approver role or above, posting from this site. The person signed in decides; x-quarter-approver may name them, and must match unless the shared admin key is used. An agent's owner cannot decide its approvals.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "approver",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/approvalId"
+          },
+          {
+            "$ref": "#/components/parameters/approver"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Any body. When it contains `form=1` (the dashboard's buttons send it form-encoded) the answer is 303 to /dashboard; otherwise JSON.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "form": {
+                    "type": "string",
+                    "enum": [
+                      "1"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "303": {
+            "$ref": "#/components/responses/BackToDashboard"
+          },
+          "409": {
+            "description": "Nothing changed: already decided, or no such approval.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotDone"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/approvals/{id}/deny": {
+      "post": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Deny an approval",
+        "description": "Approver role or above, posting from this site. The person signed in decides; x-quarter-approver may name them, and must match unless the shared admin key is used. An agent's owner cannot decide its approvals.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "approver",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/approvalId"
+          },
+          {
+            "$ref": "#/components/parameters/approver"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Any body. When it contains `form=1` (the dashboard's buttons send it form-encoded) the answer is 303 to /dashboard; otherwise JSON.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "form": {
+                    "type": "string",
+                    "enum": [
+                      "1"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "303": {
+            "$ref": "#/components/responses/BackToDashboard"
+          },
+          "409": {
+            "description": "Nothing changed: already decided, or no such approval.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotDone"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/approvals/stripe": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Stripe approval request events",
+        "description": "A thin event destination sending v2.core.approval_request.* events, signed with QUARTER_STRIPE_APPROVALS_SECRET. Each is added to the approval record once. Quarter only records; it approves nothing in Stripe.",
+        "security": [
+          {
+            "stripeSignature": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "A Stripe event."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Received.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "received": {
+                      "const": true
+                    },
+                    "recorded": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a Stripe event.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "QUARTER_STRIPE_APPROVALS_SECRET is not set.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A bad or stale Stripe signature.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/standing": {
+      "get": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Active standing approvals",
+        "description": "Approvals agreed ahead of time: an agent may spend up to an amount per call with one vendor or payee, within a monthly total.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "viewer",
+        "responses": {
+          "200": {
+            "description": "Active standing approvals.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Add a standing approval",
+        "description": "Approver role or above, posting from this site. Caps still apply. The agent's owner cannot grant one.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "approver",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "agent",
+                  "vendor",
+                  "up_to_usd",
+                  "monthly_usd"
+                ],
+                "properties": {
+                  "agent": {
+                    "type": "string"
+                  },
+                  "vendor": {
+                    "type": "string",
+                    "description": "A vendor, or rail:payee."
+                  },
+                  "up_to_usd": {
+                    "type": [
+                      "string",
+                      "number"
+                    ]
+                  },
+                  "monthly_usd": {
+                    "type": [
+                      "string",
+                      "number"
+                    ],
+                    "description": "At least up_to_usd."
+                  },
+                  "days": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 366,
+                    "default": 90
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Added.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Id"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad JSON or values.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/standing/{id}/revoke": {
+      "post": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Revoke a standing approval",
+        "description": "Approver role or above, posting from this site.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "approver",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Id"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active standing approval with that id. The body also carries the `id`.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/agents/{agent}/resume": {
+      "post": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Resume a paused agent",
+        "description": "Approver role or above, posting from this site.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "approver",
+        "parameters": [
+          {
+            "name": "agent",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Any body. When it contains `form=1` (the dashboard's buttons send it form-encoded) the answer is 303 to /dashboard; otherwise JSON.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "form": {
+                    "type": "string",
+                    "enum": [
+                      "1"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "303": {
+            "$ref": "#/components/responses/BackToDashboard"
+          },
+          "409": {
+            "description": "Nothing changed: the agent was not paused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotDone"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/tasks/{task}/resume": {
+      "post": {
+        "tags": [
+          "Approvals"
+        ],
+        "summary": "Resume a paused task",
+        "description": "Approver role or above, posting from this site.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "approver",
+        "parameters": [
+          {
+            "name": "task",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "description": "Any body. When it contains `form=1` (the dashboard's buttons send it form-encoded) the answer is 303 to /dashboard; otherwise JSON.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            },
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "form": {
+                    "type": "string",
+                    "enum": [
+                      "1"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "303": {
+            "$ref": "#/components/responses/BackToDashboard"
+          },
+          "409": {
+            "description": "Nothing changed: the task was not paused.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NotDone"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/dashboard": {
+      "get": {
+        "tags": [
+          "Finance"
+        ],
+        "summary": "The finance dashboard (HTML)",
+        "description": "HTTP basic auth; the password is a person's key or the admin key, any username.",
+        "security": [
+          {
+            "personBasic": []
+          },
+          {
+            "personKey": []
+          }
+        ],
+        "x-quarter-role": "viewer",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/month"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The page.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A bad month.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No valid key: the error object with a Basic challenge.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              },
+              "www-authenticate": {
+                "schema": {
+                  "type": "string",
+                  "const": "Basic realm=\"Quarter\""
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/forecast": {
+      "get": {
+        "tags": [
+          "Finance"
+        ],
+        "summary": "Where the month will land",
+        "description": "Month-to-date spend plus the last seven days' rate, per agent, and the caps each would reach.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "viewer",
+        "responses": {
+          "200": {
+            "description": "The forecast.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "month": {
+                      "type": "string"
+                    },
+                    "so_far": {
+                      "type": "integer"
+                    },
+                    "month_end": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "enough_data": {
+                      "type": "boolean"
+                    },
+                    "rate_days": {
+                      "type": "number"
+                    },
+                    "agents": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "agent": {
+                            "type": "string"
+                          },
+                          "so_far": {
+                            "type": "integer"
+                          },
+                          "per_day": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          },
+                          "month_end": {
+                            "type": [
+                              "integer",
+                              "null"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "cap_warnings": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "cap": {
+                            "type": "string"
+                          },
+                          "limit": {
+                            "type": "integer"
+                          },
+                          "projected": {
+                            "type": "integer"
+                          },
+                          "reached": {
+                            "type": "string",
+                            "description": "\"already\" or a date."
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/audit": {
+      "get": {
+        "tags": [
+          "Finance"
+        ],
+        "summary": "The audit log",
+        "description": "The latest 200 finance actions, failed sign-ins and upstream calls, newest first.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "viewer",
+        "responses": {
+          "200": {
+            "description": "Audit rows.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "at": {
+                        "type": "string"
+                      },
+                      "action": {
+                        "type": "string"
+                      },
+                      "client": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "detail": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/tasks/{task}/why": {
+      "get": {
+        "tags": [
+          "Finance"
+        ],
+        "summary": "Where a task's money went",
+        "description": "Amounts in micro-dollars; the parts at list price.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "viewer",
+        "parameters": [
+          {
+            "name": "task",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The report.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "task": {
+                      "type": "string"
+                    },
+                    "calls": {
+                      "type": "integer"
+                    },
+                    "subscription_calls": {
+                      "type": "integer"
+                    },
+                    "charged_micros": {
+                      "type": "integer"
+                    },
+                    "list_micros": {
+                      "type": "integer"
+                    },
+                    "cache_miss_micros": {
+                      "type": "integer"
+                    },
+                    "parts": {
+                      "type": "object"
+                    },
+                    "tools_by_server": {
+                      "type": "array"
+                    },
+                    "by_subagent": {},
+                    "by_prompt": {},
+                    "breaks": {
+                      "type": "array"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/costs": {
+      "post": {
+        "tags": [
+          "Finance"
+        ],
+        "summary": "Record a cost spent on agents",
+        "description": "Finance role or above, posting from this site. Seats, subscriptions and the like.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "finance",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "category",
+                  "vendor",
+                  "amount_usd",
+                  "month"
+                ],
+                "properties": {
+                  "category": {
+                    "type": "string"
+                  },
+                  "vendor": {
+                    "type": "string"
+                  },
+                  "amount_usd": {
+                    "type": [
+                      "string",
+                      "number"
+                    ],
+                    "description": "Positive."
+                  },
+                  "month": {
+                    "type": "string",
+                    "description": "YYYY-MM, the first month it applies to."
+                  },
+                  "monthly": {
+                    "type": "boolean",
+                    "default": false
+                  },
+                  "agent": {
+                    "type": "string"
+                  },
+                  "customer": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad JSON, a missing field, a non-positive amount, or a month that is not YYYY-MM.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/attribution": {
+      "post": {
+        "tags": [
+          "Finance"
+        ],
+        "summary": "Save the cost centre map",
+        "description": "Finance role or above, posting from this site. The dashboard's form; each change is audited.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "finance",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "version": {
+                    "type": "string",
+                    "description": "The map's version, as the form was opened."
+                  },
+                  "agent": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 64
+                    }
+                  },
+                  "department": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 100
+                    }
+                  },
+                  "class": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 100
+                    }
+                  },
+                  "location": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "maxLength": 100
+                    }
+                  },
+                  "form": {
+                    "type": "string",
+                    "enum": [
+                      "1"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Saved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ok"
+                }
+              }
+            }
+          },
+          "303": {
+            "$ref": "#/components/responses/BackToDashboard"
+          },
+          "400": {
+            "description": "A row with a centre and no agent, an agent twice, or a value too long.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No cost centre file is set, or the map changed since the form was opened.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/export": {
+      "get": {
+        "tags": [
+          "Finance"
+        ],
+        "summary": "A month's journal or FOCUS rows (CSV)",
+        "description": "As `quarter-ledger export` writes them. Audited as download. Refused cross-site.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "finance",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/month"
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "csv",
+                "quickbooks",
+                "xero",
+                "netsuite",
+                "focus"
+              ],
+              "default": "csv"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The file, as an attachment.",
+            "headers": {
+              "content-disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A bad month or format, or a cost centre file that does not read.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/audit-pack": {
+      "get": {
+        "tags": [
+          "Finance"
+        ],
+        "summary": "A month's audit pack (zip)",
+        "description": "As `quarter-ledger audit-pack` writes it. Audited as download. Refused cross-site.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "finance",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/month"
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Zip"
+          },
+          "400": {
+            "description": "A bad month.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/bills": {
+      "get": {
+        "tags": [
+          "Bills"
+        ],
+        "summary": "Bills",
+        "description": "Every bill, by due date.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "viewer",
+        "responses": {
+          "200": {
+            "description": "Bills.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Bill"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403Role"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Bills"
+        ],
+        "summary": "Enter a bill to pay",
+        "description": "An agent enters a bill. It comes back approved (held against the caps), waiting (an approval is open) or refused. A first payment to an account, changed bank details, a possible duplicate and an unlisted payee always wait for a person.",
+        "security": [
+          {
+            "agentKey": []
+          },
+          {
+            "agentBearer": []
+          },
+          {
+            "agentApiKey": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/agent"
+          },
+          {
+            "$ref": "#/components/parameters/task"
+          },
+          {
+            "$ref": "#/components/parameters/customer"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "payee",
+                  "invoice",
+                  "amount_usd",
+                  "account"
+                ],
+                "properties": {
+                  "payee": {
+                    "type": "string"
+                  },
+                  "invoice": {
+                    "type": "string"
+                  },
+                  "amount_usd": {
+                    "type": [
+                      "string",
+                      "number"
+                    ],
+                    "description": "Positive whole cents, at most $1 billion."
+                  },
+                  "account": {
+                    "type": "string",
+                    "description": "A Mercury recipient id, or the bank details on the invoice."
+                  },
+                  "due": {
+                    "type": "string",
+                    "format": "date"
+                  },
+                  "memo": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Entered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bill"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad JSON or values.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An agent key is configured and none was sent.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The agent key belongs to another agent.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The invoice is already entered.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/bills/{id}/pay": {
+      "post": {
+        "tags": [
+          "Bills"
+        ],
+        "summary": "Pay an approved bill",
+        "description": "Finance role or above, with a person's own key (the shared admin key names no one, so it is refused), posting from this site. The person paying cannot be the one who approved the bill.",
+        "security": [
+          {
+            "personKey": []
+          },
+          {
+            "personBasic": []
+          }
+        ],
+        "x-quarter-role": "finance",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "mercury",
+                      "manual"
+                    ],
+                    "default": "mercury"
+                  },
+                  "ref": {
+                    "type": "string",
+                    "description": "The bank's reference; required for manual."
+                  },
+                  "payment_method": {
+                    "type": "string",
+                    "enum": [
+                      "ach",
+                      "check",
+                      "domesticWire",
+                      "realTimePayment"
+                    ],
+                    "default": "ach"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Paid.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Bill"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad JSON, not a JSON object, a bad method or payment_method, or a manual payment with no ref.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such bill.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not approved, already being paid, or Mercury is not set up or failed.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/E401"
+          },
+          "403": {
+            "$ref": "#/components/responses/E403"
+          },
+          "429": {
+            "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/slack/actions": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Approve and Deny clicks from Slack",
+        "description": "Needs Slack set up (QUARTER_SLACK_BOT_TOKEN, _SIGNING_SECRET and _CHANNEL); without it the route answers 503. Only people in QUARTER_SLACK_USERS may decide.",
+        "security": [
+          {
+            "slackSignature": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "payload"
+                ],
+                "properties": {
+                  "payload": {
+                    "type": "string",
+                    "description": "Slack's block_actions JSON."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Taken; any note goes back to the user in Slack."
+          },
+          "400": {
+            "description": "A bad payload or an unknown action.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A bad or stale Slack signature.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Slack approvals are not set up.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/issuing/stripe": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "summary": "Stripe Issuing authorisation events",
+        "description": "issuing_authorization.request is decided within Stripe's 2 seconds, under the same caps, payee lists and screening as /authorize; the hold's id goes back in the metadata. issuing_authorization.updated with a closed status settles the hold.",
+        "security": [
+          {
+            "stripeSignature": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "A Stripe event."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "For a request event, Stripe's approve or decline answer; otherwise received.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "required": [
+                        "approved",
+                        "metadata"
+                      ],
+                      "properties": {
+                        "approved": {
+                          "type": "boolean"
+                        },
+                        "metadata": {
+                          "type": "object",
+                          "description": "quarter_call, quarter_approval, quarter_reason, quarter_shadow as they apply.",
+                          "additionalProperties": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "required": [
+                        "received"
+                      ],
+                      "properties": {
+                        "received": {
+                          "const": true
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            "headers": {
+              "stripe-version": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "On a request event's answer."
+              }
+            }
+          },
+          "400": {
+            "description": "Not a Stripe event.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "QUARTER_STRIPE_SECRET is not set.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "A bad or stale Stripe signature.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/{vendor}/{path}": {
+      "get": {
+        "tags": [
+          "Gateway"
+        ],
+        "summary": "Vendor passthrough (GET)",
+        "description": "Forwarded to the vendor's base URL (openai, anthropic, gemini, openrouter, chatgpt, or an upstream from the config). The vendor's API is not described here. A model call's worst-case cost is held first and settled to what it really cost; a call to an API that is not a model is not held, and is audited as upstream_call. PUT, PATCH and DELETE are only ever forwarded. The agent key may also arrive where the vendor key goes (Authorization: Bearer, or x-api-key), and is then swapped for the vendor's key; otherwise the vendor's own key travels with the request.",
+        "security": [
+          {
+            "agentKey": []
+          },
+          {
+            "agentBearer": []
+          },
+          {
+            "agentApiKey": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "vendor",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "description": "The rest of the vendor's path, slashes included.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/agent"
+          },
+          {
+            "$ref": "#/components/parameters/task"
+          },
+          {
+            "$ref": "#/components/parameters/customer"
+          },
+          {
+            "$ref": "#/components/parameters/approval"
+          },
+          {
+            "$ref": "#/components/parameters/wait"
+          },
+          {
+            "$ref": "#/components/parameters/cache"
+          },
+          {
+            "$ref": "#/components/parameters/fallback"
+          }
+        ],
+        "responses": {
+          "2XX": {
+            "description": "The vendor's reply, relayed as it came (streams as they arrive), with Quarter's headers added. A reply holding a tool call a rule holds has that call replaced by a note until a person approves.",
+            "headers": {
+              "x-quarter-call": {
+                "$ref": "#/components/headers/x-quarter-call"
+              },
+              "x-quarter-shadow": {
+                "$ref": "#/components/headers/x-quarter-shadow"
+              },
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              },
+              "x-quarter-upstream": {
+                "$ref": "#/components/headers/x-quarter-upstream"
+              },
+              "x-quarter-redacted": {
+                "$ref": "#/components/headers/x-quarter-redacted"
+              },
+              "x-quarter-billing": {
+                "$ref": "#/components/headers/x-quarter-billing"
+              },
+              "x-quarter-cache": {
+                "$ref": "#/components/headers/x-quarter-cache"
+              },
+              "x-quarter-model": {
+                "$ref": "#/components/headers/x-quarter-model"
+              },
+              "x-quarter-fail-open": {
+                "$ref": "#/components/headers/x-quarter-fail-open"
+              }
+            }
+          },
+          "400": {
+            "description": "A bad path, a body that is not JSON, a bad x-quarter-wait, or a model with no price anywhere.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An agent key is configured and none was sent.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Over a cap. The call did not reach the vendor.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused before the vendor: a rule denies it, the approval was denied, the agent key belongs to another agent, or an approval is required (the body carries the approval id; retry with x-quarter-approval).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No upstream by that name.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The agent or the task is paused.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The vendor was unreachable, or the connection was lost after sending (charged, never resent).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The gateway has no key for that vendor, or the ledger is unavailable.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Any other vendor status, relayed with Quarter's headers."
+          }
+        },
+        "operationId": "passthrough_get"
+      },
+      "post": {
+        "tags": [
+          "Gateway"
+        ],
+        "summary": "Vendor passthrough (POST)",
+        "description": "Forwarded to the vendor's base URL (openai, anthropic, gemini, openrouter, chatgpt, or an upstream from the config). The vendor's API is not described here. A model call's worst-case cost is held first and settled to what it really cost; a call to an API that is not a model is not held, and is audited as upstream_call. PUT, PATCH and DELETE are only ever forwarded. The agent key may also arrive where the vendor key goes (Authorization: Bearer, or x-api-key), and is then swapped for the vendor's key; otherwise the vendor's own key travels with the request.",
+        "security": [
+          {
+            "agentKey": []
+          },
+          {
+            "agentBearer": []
+          },
+          {
+            "agentApiKey": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "vendor",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "description": "The rest of the vendor's path, slashes included.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/agent"
+          },
+          {
+            "$ref": "#/components/parameters/task"
+          },
+          {
+            "$ref": "#/components/parameters/customer"
+          },
+          {
+            "$ref": "#/components/parameters/approval"
+          },
+          {
+            "$ref": "#/components/parameters/wait"
+          },
+          {
+            "$ref": "#/components/parameters/cache"
+          },
+          {
+            "$ref": "#/components/parameters/fallback"
+          }
+        ],
+        "responses": {
+          "2XX": {
+            "description": "The vendor's reply, relayed as it came (streams as they arrive), with Quarter's headers added. A reply holding a tool call a rule holds has that call replaced by a note until a person approves.",
+            "headers": {
+              "x-quarter-call": {
+                "$ref": "#/components/headers/x-quarter-call"
+              },
+              "x-quarter-shadow": {
+                "$ref": "#/components/headers/x-quarter-shadow"
+              },
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              },
+              "x-quarter-upstream": {
+                "$ref": "#/components/headers/x-quarter-upstream"
+              },
+              "x-quarter-redacted": {
+                "$ref": "#/components/headers/x-quarter-redacted"
+              },
+              "x-quarter-billing": {
+                "$ref": "#/components/headers/x-quarter-billing"
+              },
+              "x-quarter-cache": {
+                "$ref": "#/components/headers/x-quarter-cache"
+              },
+              "x-quarter-model": {
+                "$ref": "#/components/headers/x-quarter-model"
+              },
+              "x-quarter-fail-open": {
+                "$ref": "#/components/headers/x-quarter-fail-open"
+              }
+            }
+          },
+          "400": {
+            "description": "A bad path, a body that is not JSON, a bad x-quarter-wait, or a model with no price anywhere.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An agent key is configured and none was sent.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Over a cap. The call did not reach the vendor.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused before the vendor: a rule denies it, the approval was denied, the agent key belongs to another agent, or an approval is required (the body carries the approval id; retry with x-quarter-approval).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No upstream by that name.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The agent or the task is paused.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The vendor was unreachable, or the connection was lost after sending (charged, never resent).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The gateway has no key for that vendor, or the ledger is unavailable.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Any other vendor status, relayed with Quarter's headers."
+          }
+        },
+        "operationId": "passthrough_post"
+      },
+      "put": {
+        "tags": [
+          "Gateway"
+        ],
+        "summary": "Vendor passthrough (PUT)",
+        "description": "Forwarded to the vendor's base URL (openai, anthropic, gemini, openrouter, chatgpt, or an upstream from the config). The vendor's API is not described here. A model call's worst-case cost is held first and settled to what it really cost; a call to an API that is not a model is not held, and is audited as upstream_call. PUT, PATCH and DELETE are only ever forwarded. The agent key may also arrive where the vendor key goes (Authorization: Bearer, or x-api-key), and is then swapped for the vendor's key; otherwise the vendor's own key travels with the request.",
+        "security": [
+          {
+            "agentKey": []
+          },
+          {
+            "agentBearer": []
+          },
+          {
+            "agentApiKey": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "vendor",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "description": "The rest of the vendor's path, slashes included.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/agent"
+          },
+          {
+            "$ref": "#/components/parameters/task"
+          },
+          {
+            "$ref": "#/components/parameters/customer"
+          },
+          {
+            "$ref": "#/components/parameters/approval"
+          },
+          {
+            "$ref": "#/components/parameters/wait"
+          },
+          {
+            "$ref": "#/components/parameters/cache"
+          },
+          {
+            "$ref": "#/components/parameters/fallback"
+          }
+        ],
+        "responses": {
+          "2XX": {
+            "description": "The vendor's reply, relayed as it came (streams as they arrive), with Quarter's headers added. A reply holding a tool call a rule holds has that call replaced by a note until a person approves.",
+            "headers": {
+              "x-quarter-call": {
+                "$ref": "#/components/headers/x-quarter-call"
+              },
+              "x-quarter-shadow": {
+                "$ref": "#/components/headers/x-quarter-shadow"
+              },
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              },
+              "x-quarter-upstream": {
+                "$ref": "#/components/headers/x-quarter-upstream"
+              },
+              "x-quarter-redacted": {
+                "$ref": "#/components/headers/x-quarter-redacted"
+              },
+              "x-quarter-billing": {
+                "$ref": "#/components/headers/x-quarter-billing"
+              },
+              "x-quarter-cache": {
+                "$ref": "#/components/headers/x-quarter-cache"
+              },
+              "x-quarter-model": {
+                "$ref": "#/components/headers/x-quarter-model"
+              },
+              "x-quarter-fail-open": {
+                "$ref": "#/components/headers/x-quarter-fail-open"
+              }
+            }
+          },
+          "400": {
+            "description": "A bad path, a body that is not JSON, a bad x-quarter-wait, or a model with no price anywhere.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An agent key is configured and none was sent.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Over a cap. The call did not reach the vendor.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused before the vendor: a rule denies it, the approval was denied, the agent key belongs to another agent, or an approval is required (the body carries the approval id; retry with x-quarter-approval).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No upstream by that name.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The agent or the task is paused.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The vendor was unreachable, or the connection was lost after sending (charged, never resent).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The gateway has no key for that vendor, or the ledger is unavailable.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Any other vendor status, relayed with Quarter's headers."
+          }
+        },
+        "operationId": "passthrough_put"
+      },
+      "patch": {
+        "tags": [
+          "Gateway"
+        ],
+        "summary": "Vendor passthrough (PATCH)",
+        "description": "Forwarded to the vendor's base URL (openai, anthropic, gemini, openrouter, chatgpt, or an upstream from the config). The vendor's API is not described here. A model call's worst-case cost is held first and settled to what it really cost; a call to an API that is not a model is not held, and is audited as upstream_call. PUT, PATCH and DELETE are only ever forwarded. The agent key may also arrive where the vendor key goes (Authorization: Bearer, or x-api-key), and is then swapped for the vendor's key; otherwise the vendor's own key travels with the request.",
+        "security": [
+          {
+            "agentKey": []
+          },
+          {
+            "agentBearer": []
+          },
+          {
+            "agentApiKey": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "vendor",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "description": "The rest of the vendor's path, slashes included.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/agent"
+          },
+          {
+            "$ref": "#/components/parameters/task"
+          },
+          {
+            "$ref": "#/components/parameters/customer"
+          },
+          {
+            "$ref": "#/components/parameters/approval"
+          },
+          {
+            "$ref": "#/components/parameters/wait"
+          },
+          {
+            "$ref": "#/components/parameters/cache"
+          },
+          {
+            "$ref": "#/components/parameters/fallback"
+          }
+        ],
+        "responses": {
+          "2XX": {
+            "description": "The vendor's reply, relayed as it came (streams as they arrive), with Quarter's headers added. A reply holding a tool call a rule holds has that call replaced by a note until a person approves.",
+            "headers": {
+              "x-quarter-call": {
+                "$ref": "#/components/headers/x-quarter-call"
+              },
+              "x-quarter-shadow": {
+                "$ref": "#/components/headers/x-quarter-shadow"
+              },
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              },
+              "x-quarter-upstream": {
+                "$ref": "#/components/headers/x-quarter-upstream"
+              },
+              "x-quarter-redacted": {
+                "$ref": "#/components/headers/x-quarter-redacted"
+              },
+              "x-quarter-billing": {
+                "$ref": "#/components/headers/x-quarter-billing"
+              },
+              "x-quarter-cache": {
+                "$ref": "#/components/headers/x-quarter-cache"
+              },
+              "x-quarter-model": {
+                "$ref": "#/components/headers/x-quarter-model"
+              },
+              "x-quarter-fail-open": {
+                "$ref": "#/components/headers/x-quarter-fail-open"
+              }
+            }
+          },
+          "400": {
+            "description": "A bad path, a body that is not JSON, a bad x-quarter-wait, or a model with no price anywhere.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An agent key is configured and none was sent.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Over a cap. The call did not reach the vendor.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused before the vendor: a rule denies it, the approval was denied, the agent key belongs to another agent, or an approval is required (the body carries the approval id; retry with x-quarter-approval).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No upstream by that name.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The agent or the task is paused.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The vendor was unreachable, or the connection was lost after sending (charged, never resent).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The gateway has no key for that vendor, or the ledger is unavailable.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Any other vendor status, relayed with Quarter's headers."
+          }
+        },
+        "operationId": "passthrough_patch"
+      },
+      "delete": {
+        "tags": [
+          "Gateway"
+        ],
+        "summary": "Vendor passthrough (DELETE)",
+        "description": "Forwarded to the vendor's base URL (openai, anthropic, gemini, openrouter, chatgpt, or an upstream from the config). The vendor's API is not described here. A model call's worst-case cost is held first and settled to what it really cost; a call to an API that is not a model is not held, and is audited as upstream_call. PUT, PATCH and DELETE are only ever forwarded. The agent key may also arrive where the vendor key goes (Authorization: Bearer, or x-api-key), and is then swapped for the vendor's key; otherwise the vendor's own key travels with the request.",
+        "security": [
+          {
+            "agentKey": []
+          },
+          {
+            "agentBearer": []
+          },
+          {
+            "agentApiKey": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "vendor",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "description": "The rest of the vendor's path, slashes included.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/agent"
+          },
+          {
+            "$ref": "#/components/parameters/task"
+          },
+          {
+            "$ref": "#/components/parameters/customer"
+          },
+          {
+            "$ref": "#/components/parameters/approval"
+          },
+          {
+            "$ref": "#/components/parameters/wait"
+          },
+          {
+            "$ref": "#/components/parameters/cache"
+          },
+          {
+            "$ref": "#/components/parameters/fallback"
+          }
+        ],
+        "responses": {
+          "2XX": {
+            "description": "The vendor's reply, relayed as it came (streams as they arrive), with Quarter's headers added. A reply holding a tool call a rule holds has that call replaced by a note until a person approves.",
+            "headers": {
+              "x-quarter-call": {
+                "$ref": "#/components/headers/x-quarter-call"
+              },
+              "x-quarter-shadow": {
+                "$ref": "#/components/headers/x-quarter-shadow"
+              },
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              },
+              "x-quarter-upstream": {
+                "$ref": "#/components/headers/x-quarter-upstream"
+              },
+              "x-quarter-redacted": {
+                "$ref": "#/components/headers/x-quarter-redacted"
+              },
+              "x-quarter-billing": {
+                "$ref": "#/components/headers/x-quarter-billing"
+              },
+              "x-quarter-cache": {
+                "$ref": "#/components/headers/x-quarter-cache"
+              },
+              "x-quarter-model": {
+                "$ref": "#/components/headers/x-quarter-model"
+              },
+              "x-quarter-fail-open": {
+                "$ref": "#/components/headers/x-quarter-fail-open"
+              }
+            }
+          },
+          "400": {
+            "description": "A bad path, a body that is not JSON, a bad x-quarter-wait, or a model with no price anywhere.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An agent key is configured and none was sent.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Over a cap. The call did not reach the vendor.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Refused before the vendor: a rule denies it, the approval was denied, the agent key belongs to another agent, or an approval is required (the body carries the approval id; retry with x-quarter-approval).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No upstream by that name.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "423": {
+            "description": "The agent or the task is paused.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The vendor was unreachable, or the connection was lost after sending (charged, never resent).",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The gateway has no key for that vendor, or the ledger is unavailable.",
+            "headers": {
+              "x-quarter-free-limit": {
+                "$ref": "#/components/headers/x-quarter-free-limit"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Any other vendor status, relayed with Quarter's headers."
+          }
+        },
+        "operationId": "passthrough_delete"
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "agent": {
+        "name": "x-quarter-agent",
+        "in": "header",
+        "required": false,
+        "description": "The agent. Else the name given to the agent key, else \"default\". A named key may speak only for its agent (403).",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "task": {
+        "name": "x-quarter-task",
+        "in": "header",
+        "required": false,
+        "description": "The task. Claude Code's x-claude-code-session-id is the default.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "customer": {
+        "name": "x-quarter-customer",
+        "in": "header",
+        "required": false,
+        "description": "The customer the spend is for.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "approval": {
+        "name": "x-quarter-approval",
+        "in": "header",
+        "required": false,
+        "description": "An approved approval id, to retry a call or payment that needed approval.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "wait": {
+        "name": "x-quarter-wait",
+        "in": "header",
+        "required": false,
+        "description": "Seconds to hold a call or payment that needs approval open until someone decides; at most 300, or QUARTER_MAX_WAIT.",
+        "schema": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "approver": {
+        "name": "x-quarter-approver",
+        "in": "header",
+        "required": false,
+        "description": "Who is deciding. Must match the person signed in, unless the shared admin key is used (403 otherwise).",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "cache": {
+        "name": "x-quarter-cache",
+        "in": "header",
+        "required": false,
+        "description": "\"off\" stops Quarter adding Anthropic's cache marker.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "off"
+          ]
+        }
+      },
+      "fallback": {
+        "name": "x-quarter-fallback",
+        "in": "header",
+        "required": false,
+        "description": "\"off\" stops Quarter moving the call to a cheaper model near a cap.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "off"
+          ]
+        }
+      },
+      "month": {
+        "name": "month",
+        "in": "query",
+        "required": false,
+        "description": "YYYY-MM, not later than this month. In the first 7 days of a month the default is last month.",
+        "schema": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])$"
+        }
+      },
+      "approvalId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string"
+        }
+      }
+    },
+    "headers": {
+      "x-quarter-call": {
+        "description": "The call's id in the ledger.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "x-quarter-shadow": {
+        "description": "Let through only because a rule is in shadow mode: what it would have done.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "would_block",
+            "would_approve"
+          ]
+        }
+      },
+      "x-quarter-free-limit": {
+        "description": "Past QUARTER_FREE_DECISIONS this month; the call is decided as ever.",
+        "schema": {
+          "type": "string",
+          "const": "exceeded"
+        }
+      },
+      "x-quarter-upstream": {
+        "description": "A routing rule sent the call to this upstream instead.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "x-quarter-redacted": {
+        "description": "What was masked before the model saw it, and put back in the reply.",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "x-quarter-billing": {
+        "description": "Paid by a plan, recorded at no cost.",
+        "schema": {
+          "type": "string",
+          "const": "subscription"
+        }
+      },
+      "x-quarter-cache": {
+        "description": "Quarter added Anthropic's cache marker.",
+        "schema": {
+          "type": "string",
+          "const": "added"
+        }
+      },
+      "x-quarter-model": {
+        "description": "Moved to a cheaper model near a cap: \"asked -> used\".",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "x-quarter-fail-open": {
+        "description": "The ledger could not be written and QUARTER_FAIL_OPEN let this model call through.",
+        "schema": {
+          "type": "string",
+          "const": "model"
+        }
+      }
+    },
+    "securitySchemes": {
+      "agentKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-quarter-key",
+        "description": "An agent key. Not needed when no agent keys are configured."
+      },
+      "agentBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "An agent key where the vendor key goes."
+      },
+      "agentApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "An agent key where Anthropic's key goes."
+      },
+      "personKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-quarter-key",
+        "description": "A person's key (QUARTER_PEOPLE) or QUARTER_ADMIN_KEY. The operation's x-quarter-role is the least role it needs."
+      },
+      "personBasic": {
+        "type": "http",
+        "scheme": "basic",
+        "description": "HTTP basic auth: the password is a person's key or the admin key; any username."
+      },
+      "slackSignature": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-slack-signature",
+        "description": "Slack's signature over x-slack-request-timestamp and the raw body, at most 5 minutes old."
+      },
+      "stripeSignature": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "stripe-signature",
+        "description": "Stripe's webhook signature with the endpoint's whsec_ secret."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "description": "An error object carrying a message, and sometimes more (such as an approval id)."
+      },
+      "Ok": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ]
+      },
+      "Id": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "Approval": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "agent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "customer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vendor": {
+            "type": "string",
+            "description": "A vendor, or rail:payee."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model, rail or action."
+          },
+          "estimate": {
+            "type": "integer",
+            "description": "Micro-dollars."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "Bill": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "payee": {
+            "type": "string"
+          },
+          "invoice": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer",
+            "description": "Micro-dollars."
+          },
+          "status": {
+            "type": "string",
+            "description": "approved, waiting, refused, paying, paid and so on."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "approval_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "due": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "NotDone": {
+        "type": "object",
+        "required": [
+          "ok",
+          "error"
+        ],
+        "properties": {
+          "ok": {
+            "const": false
+          },
+          "error": {
+            "type": "string",
+            "description": "Why nothing changed."
+          }
+        }
+      }
+    },
+    "responses": {
+      "E401": {
+        "description": "No valid person key.",
+        "headers": {
+          "x-quarter-free-limit": {
+            "$ref": "#/components/headers/x-quarter-free-limit"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E403": {
+        "description": "Cross-site request refused, or the person's role is below the one needed.",
+        "headers": {
+          "x-quarter-free-limit": {
+            "$ref": "#/components/headers/x-quarter-free-limit"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E403Role": {
+        "description": "The person's role is below the one needed.",
+        "headers": {
+          "x-quarter-free-limit": {
+            "$ref": "#/components/headers/x-quarter-free-limit"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "E429": {
+        "description": "Too many wrong keys from this address; try again later.",
+        "headers": {
+          "x-quarter-free-limit": {
+            "$ref": "#/components/headers/x-quarter-free-limit"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "BackToDashboard": {
+        "description": "From the dashboard's form: back to it.",
+        "headers": {
+          "location": {
+            "schema": {
+              "type": "string",
+              "const": "/dashboard"
+            }
+          }
+        }
+      },
+      "Zip": {
+        "description": "The file, as an attachment.",
+        "headers": {
+          "content-disposition": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/zip": {
+            "schema": {
+              "type": "string",
+              "contentMediaType": "application/zip"
+            }
+          }
+        }
+      },
+      "E405": {
+        "description": "The path is a Quarter route, but not for this method.",
+        "headers": {
+          "allow": {
+            "description": "The methods this route answers.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          "x-quarter-free-limit": {
+            "$ref": "#/components/headers/x-quarter-free-limit"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -181,9 +181,9 @@ def test_deny_returns_the_refusal(slack_gateway):
     thread.join(5)
     status, body = result["reply"]
     assert status == 403
-    assert json.loads(body) == {
-        "error": "approval_denied", "approval_id": approval, "decided_by": "Sam"
-    }
+    reply = json.loads(body)
+    assert reply["error"]["code"] == "approval_denied" and reply["error"]["approval_id"] == approval
+    assert reply["error"]["message"] == f"Sam denied approval {approval}, so Quarter did not send this call."
     assert FakeVendor.calls == []
 
 
@@ -191,7 +191,7 @@ def test_wait_ends_with_approval_required(slack_gateway):
     url, ledger = slack_gateway
     started = time.monotonic()
     status, body = call(url + "/fake/v1/chat", BIG, {**HEADERS, "x-quarter-wait": "0.5"})
-    assert status == 403 and json.loads(body)["error"] == "approval_required"
+    assert status == 403 and json.loads(body)["error"]["code"] == "approval_required"
     assert time.monotonic() - started >= 0.5
     assert ledger.approval(json.loads(body)["approval_id"])["status"] == "pending"
     assert call(url + "/fake/v1/chat", BIG, {**HEADERS, "x-quarter-wait": "soon"})[0] == 400

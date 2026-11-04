@@ -2,6 +2,8 @@
 
 POST /v1/chat/completions (OpenAI) and POST /v1/messages (Anthropic) answer a canned reply,
 streamed or not, with usage counted the way the vendor counts it, so the gateway prices it.
+GET /v1/models lists the two models, in Anthropic's shape when anthropic-version is sent.
+Every reply carries a request id, as the vendors' do.
 Tokens are estimated at four characters each. PORT sets the port (default 8790).
 """
 
@@ -56,6 +58,14 @@ def anthropic_reply(request: dict) -> tuple[dict, list[dict]]:
     return reply, events
 
 
+def models(anthropic: bool) -> dict:
+    ids = ("gpt-4o-mini", "claude-haiku-4-5")
+    if anthropic:
+        data = [{"type": "model", "id": m, "display_name": m, "created_at": "2025-01-01T00:00:00Z"} for m in ids]
+        return {"data": data, "has_more": False, "first_id": ids[0], "last_id": ids[-1]}
+    return {"object": "list", "data": [{"id": m, "object": "model", "created": 0, "owned_by": "sandbox"} for m in ids]}
+
+
 ROUTES = {"/v1/chat/completions": openai_reply, "/v1/messages": anthropic_reply}
 
 
@@ -65,6 +75,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/healthz":
             return self._send(200, "application/json", b'{"ok": true}')
+        if self.path.split("?")[0] == "/v1/models":
+            body = models("anthropic-version" in self.headers)
+            return self._send(200, "application/json", json.dumps(body).encode())
         self._send(404, "application/json", b'{"error": "not found"}')
 
     def do_POST(self):
@@ -91,6 +104,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("content-type", kind)
         self.send_header("content-length", str(len(data)))
+        self.send_header("x-request-id", "req_sandbox")
+        self.send_header("request-id", "req_sandbox")
         self.end_headers()
         self.wfile.write(data)
 

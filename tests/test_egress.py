@@ -129,7 +129,7 @@ def test_graphql_delete_without_wait_needs_an_approval_that_covers_only_that_cal
     url, ledger = egress
     status, body = call(url + "/railway/graphql/v2", VOLUME_DELETE, as_agent(DEPLOYER))
     reply = json.loads(body)
-    assert status == 403 and reply["error"] == "approval_required"
+    assert status == 403 and reply["error"]["code"] == "approval_required"
     assert "rule 2" in reply["reason"] and FakeApi.calls == []
     ledger.decide_approval(reply["approval_id"], True, by="Sam")
 
@@ -147,7 +147,7 @@ def test_a_denied_approval_never_reaches_the_upstream(egress):
     status, body = call(url + "/railway/graphql/v2", VOLUME_DELETE,
                         as_agent(DEPLOYER, **{"x-quarter-wait": "10"}))
     person.join()
-    assert status == 403 and json.loads(body)["error"] == "approval_denied"
+    assert status == 403 and json.loads(body)["error"]["code"] == "approval_denied"
     assert FakeApi.calls == []
     assert upstream_calls(ledger)[-1]["decision"] == "denied"
 
@@ -163,7 +163,7 @@ def test_graphql_names_cannot_hide_a_delete(egress):
     ]
     for body in hidden:
         status, reply = call(url + "/railway/graphql/v2", body, as_agent(DEPLOYER))
-        assert status == 403 and json.loads(reply)["error"] == "approval_required", body
+        assert status == 403 and json.loads(reply)["error"]["code"] == "approval_required", body
     form = {"content-type": "application/x-www-form-urlencoded"}
     smuggled = [  # (body, extra headers, query string)
         (b"query=mutation+%7B+volumeDelete%28volumeId%3A+1%29+%7D", form, ""),
@@ -175,7 +175,7 @@ def test_graphql_names_cannot_hide_a_delete(egress):
         req = urllib.request.Request(url + "/railway/graphql/v2" + query, raw, as_agent(DEPLOYER, **extra))
         with pytest.raises(urllib.error.HTTPError) as refused:
             urllib.request.urlopen(req)
-        assert json.loads(refused.value.read())["error"] == "approval_required", raw
+        assert json.loads(refused.value.read())["error"]["code"] == "approval_required", raw
     assert FakeApi.calls == []
     query = {"query": "query { projects { edges { node { id } } } }"}
     assert call(url + "/railway/graphql/v2", query, as_agent(DEPLOYER))[0] == 200
@@ -185,7 +185,11 @@ def test_upstream_marked_deny_refuses_what_no_rule_allows(egress):
     url, _ = egress
     status, body = call(url + "/railway/v1/anything", headers=as_agent(DEPLOYER))
     assert status == 403
-    assert json.loads(body) == {"error": "rule_denied", "rule": "no rule matched; railway defaults to deny"}
+    rule = "no rule matched; railway defaults to deny"
+    assert json.loads(body)["error"] == {
+        "type": "permission_error", "message": f"A Quarter rule refused this call ({rule}).",
+        "code": "rule_denied", "rule": rule,
+    }
     assert FakeApi.calls == []
 
 
@@ -193,7 +197,8 @@ def test_rest_delete_is_denied_with_the_rule(egress):
     url, ledger = egress
     status, body = call(url + "/github/repos/acme/app", headers=as_agent(DEPLOYER), method="DELETE")
     assert status == 403
-    assert json.loads(body) == {"error": "rule_denied", "rule": "rule 4: deny github DELETE /repos/*"}
+    reply = json.loads(body)
+    assert reply["error"]["code"] == "rule_denied" and reply["rule"] == "rule 4: deny github DELETE /repos/*"
     assert FakeApi.calls == []
     (row,) = upstream_calls(ledger)
     assert row["decision"] == "denied" and row["method"] == "DELETE"
@@ -253,7 +258,7 @@ def test_paused_agent_cannot_act_on_an_upstream(egress):
     url, ledger = egress
     ledger.pause("deployer", "spent too fast")
     status, body = call(url + "/github/repos/acme/app", headers=as_agent(DEPLOYER))
-    assert status == 423 and json.loads(body)["error"] == "agent_paused"
+    assert status == 423 and json.loads(body)["error"]["code"] == "agent_paused"
     assert FakeApi.calls == []
 
 
@@ -261,7 +266,7 @@ def test_a_task_paused_for_looping_cannot_act_on_an_upstream(egress):
     url, ledger = egress
     ledger.pause("deployer", "made the same tool call 8 times in 5 minutes", task="t1")
     status, body = call(url + "/github/repos/acme/app", headers=as_agent(DEPLOYER, **{"x-quarter-task": "t1"}))
-    assert status == 423 and json.loads(body)["error"] == "task_paused"
+    assert status == 423 and json.loads(body)["error"]["code"] == "task_paused"
     assert FakeApi.calls == []
     status, _ = call(url + "/github/repos/acme/app", headers=as_agent(DEPLOYER, **{"x-quarter-task": "t2"}))
     assert status == 200

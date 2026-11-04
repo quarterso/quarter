@@ -11,7 +11,7 @@ Litestream ──every 10 s──> R2 or B2 (every tenant but the sandbox)
 - **Ingress:** `cloudflared` dials out to Cloudflare, so the box needs no public IPv4 and no open port. It sends `*.quarterfi.com` to Caddy, which routes by host to each tenant over plain HTTP. Each tenant has its own Docker network, which only Caddy joins, so no tenant can reach another's container directly. TLS ends at Cloudflare. Unknown hosts get 404.
 - **Wait cap:** Cloudflare cuts a proxied request at about 125 seconds. The kit sets `QUARTER_MAX_WAIT=110`, so `x-quarter-wait` holds a call at most 110 seconds. Self-hosted gateways keep 300.
 - **Memory:** each tenant has a limit (96 MB unless set), so one tenant cannot starve the others.
-- **Sandbox:** a tenant for prospects. Its upstreams are a mock (`deploy/hosted/mock_upstream.py`) that answers OpenAI and Anthropic chat calls with a canned reply and realistic usage. The gateway runs inside the mock's network namespace, so it reaches the mock on localhost and survives its own restarts. Its network has no way out, so no vendor key is on the box. Its caps are $1 a day per agent and $5 a day in all. It is wiped every night and never backed up.
+- **Sandbox:** a tenant for prospects. Its upstreams are a mock (`deploy/hosted/mock_upstream.py`) that answers OpenAI and Anthropic chat calls with a canned reply and realistic usage. The gateway runs inside the mock's network namespace, so it reaches the mock on localhost and survives its own restarts. Its network has no way out, so no vendor key is on the box. Its caps are $1 a day per agent and $100 a day in all. The total is high on purpose: every prospect shares it, and at $5 one load test locked the sandbox for everyone until the nightly reset. It is wiped every night and never backed up.
 
 ## What it costs
 
@@ -19,7 +19,7 @@ From `quarter/memory/strategy/cheapest-running-2026-11-03.md` and `quarter/memor
 
 | Stage | Box | Per month |
 | --- | --- | --- |
-| Sandbox and design partners | Oracle Cloud Always Free ARM (4 cores, 24 GB, public IPv4), running since 2026-11-03 | $0 |
+| Sandbox and design partners | Oracle Cloud Always Free ARM (2 cores, 12 GB, public IPv4), running since 2026-11-03 | $0 |
 | First paying customers | DigitalOcean $4 (512 MB), then resize to 2 GB at about 10 customers | $4, then $12 |
 | About 50 customers | Two 4 GB boxes, about 25 tenants each, Litestream to B2 | about $48 |
 
@@ -33,12 +33,16 @@ From `quarter/memory/strategy/cheapest-running-2026-11-03.md` and `quarter/memor
 
 Google closed the founder's new billing accounts as "not in good standing" (D191), so the free box is on Oracle Cloud's Always Free tier instead. It has public IPv4, so the IPv6 traps below do not apply and Slack approvals work.
 
-- **Box:** `quarter-1`, `VM.Standard.A1.Flex` (4 OCPU, 24 GB, 100 GB boot volume), Ubuntu 24.04 aarch64, home region `us-phoenix-1`, availability domain 2 (domain 1 answered "Out of host capacity"). VCN `quarter`, subnet `quarter-public`, security list `quarter-ssh-only`: inbound TCP 22 only, password login off. Docker and unattended upgrades installed.
-- **Image:** build it for arm64 on a Mac with `docker build --platform linux/arm64 -t quarter-ledger:<sha>-arm64 .`. The pinned Caddy and cloudflared digests are multi-arch.
+- **Box:** `quarter-1`, `VM.Standard.A1.Flex` at 2 OCPU and 12 GB (Oracle cut the Always Free Arm allowance to that in 2026; the box was made at 4 and 24 and resized on 2026-11-03, before the trial could disable it), 100 GB boot volume, Ubuntu 24.04 aarch64, `us-phoenix-1`, availability domain 2 (domain 1 answered "Out of host capacity"). VCN `quarter`, subnet `quarter-public`, security list `quarter-ssh-only`: inbound TCP 22 only, password login off. Docker and unattended upgrades installed. `/etc/docker/daemon.json` sets `default-address-pools` to `10.200.0.0/16` in /24s: each tenant has its own network, and Docker's default pools run out at about 27.
+- **Image:** build it for arm64 on a Mac with `docker build --platform linux/arm64 -t quarter-ledger:<sha>-arm64 .`. The pinned Caddy, cloudflared and Litestream digests are multi-arch.
 - **Access:** `ssh quarter-1` (an entry in `~/.ssh/config` with key `~/.ssh/quarter_oci`). The OCI CLI uses `oci session authenticate` (browser, about an hour) and `OCI_CLI_AUTH=security_token`.
-- **Tunnel:** `quarter-hosted`, id `c159f744-fb83-4314-a94e-dfafde882781`. Only `sandbox.quarterfi.com` is routed so far (`cloudflared tunnel route dns quarter-hosted <tenant>.quarterfi.com`, one per tenant, rather than the wildcard).
-- **Running:** the sandbox, its mock and Caddy, with the nightly reset in root's crontab. Checked from outside: `/healthz` answers, a call with no key gets 401, a call with the sandbox key gets the canned reply. No Litestream yet: the sandbox is never backed up, and the first real tenant needs a bucket first.
-- **Reclaim risk:** Oracle may stop an Always Free machine that stays nearly idle for 7 days. Upgrading the account to Pay As You Go stops that and keeps Always Free resources free, but lets Oracle charge the card for anything else. Open in D191.
+- **Tunnel:** `quarter-hosted`, id `c159f744-fb83-4314-a94e-dfafde882781`. One DNS route per tenant, made by `add-tenant.sh`, rather than the wildcard.
+- **Add a customer:** `deploy/hosted/add-tenant.sh <name>`. It adds the tenant with the newest tag, renders, copies, makes its keys on the box (never printed), routes `<name>.quarterfi.com`, starts it and checks `/healthz` from outside, resolving through 1.1.1.1 because the local resolver may still cache the name as missing.
+- **Running:** the sandbox, its mock, Caddy, Litestream and `demo` (a backed-up tenant for walkthroughs). The sandbox resets nightly from root's crontab.
+- **Backups:** Litestream to the Oracle Object Storage bucket `quarter-backups` (S3 endpoint `https://<namespace>.compat.objectstorage.us-phoenix-1.oraclecloud.com`, path style), with a customer secret key written straight into `env/litestream.env`. A new key is refused with 403 `SignatureDoesNotMatch` for a few minutes. Restore checked on 2026-11-03: `demo` came back from the bucket and `verify-chain` passed. Limits: Always Free allows 50,000 requests a month, which one busy tenant at a 10-second sync can exceed; the bucket is in the same region and account as the box; Litestream copies only `ledger.db`, so `nightly_backup.py` runs from root's crontab at 04:30: it packs `env/*.env`, the tunnel credentials, every non-sandbox tenant's other files (`ledger.signing-key`) and a copy of each ledger made by `quarter-ledger backup` (which checks the hash chains), encrypts the pack with `age` to `backup-recipient.txt` and uploads `secrets/<date>.tar.age` to the Litestream bucket and, when `env/b2.env` exists, to a Backblaze B2 bucket (live: `quarter-backups-qf7k`, us-east-005, keep only the last version, key limited to that bucket), deleting the copy from 30 days before. The private key is only in the founder's Keychain as `quarter-hosted-backup` (made by `backup-key.sh`); read a copy with `security find-generic-password -s quarter-hosted-backup -w | age -d -i - <file> | tar -tzv`. Alerts (live since 2026-11-04 UTC, checks "quarter nightly backup" 1 day + 2 h grace and "quarter litestream" 1 h + 30 min, emailing the founder): with `env/healthchecks.env` (`HC_BACKUP_URL`, `HC_LITESTREAM_URL`), the nightly run pings healthchecks.io on success and `/fail` on any error, and an hourly `--litestream` run pings when Litestream logged no error in the last 65 minutes. Put keys on the box with `deploy/hosted/put-env.sh <file> VAR...`, which asks with hidden input.
+- **Measured on the box** (4 OCPU, before the resize): about 23 MB per idle tenant, 39 MB after 2,000 calls; through Caddy to the sandbox and its mock, 158 decided calls a second with 10 at once (p50 46 ms, p99 111 ms). One load test spent the sandbox's old $5 daily total and locked it for every prospect, so that cap is now $100.
+- **Reclaim risk:** Oracle may stop an Always Free machine that stays nearly idle for 7 days (95th percentile CPU, network and memory all under 20%). Upgrading the account to Pay As You Go keeps Always Free resources free, but lets Oracle charge the card for anything else. Open in D191.
+- **Scale path:** `quarter/memory/strategy/infra-expansion-2026-11-03.md`.
 
 ## First box on Google Cloud (not used)
 
@@ -91,7 +95,7 @@ The free e2-micro, from nothing. Steps marked **by hand** only the founder can d
 1. **Make the VM.** On Google Cloud, as in "First box" above. On a paid box with IPv4, any Ubuntu VM works; close every inbound port but 22.
 2. **Install Docker:** `curl -fsSL https://get.docker.com | sh`. Docker turns on IPv6 forwarding, and Linux then ignores router advertisements, which can drop the VM's IPv6 route. On the IPv6-only VM, keep them: `echo 'net.ipv6.conf.ens4.accept_ra = 2' > /etc/sysctl.d/90-ra.conf && sysctl --system` (the interface may not be `ens4`; see `ip -6 route`).
 3. **Make the tunnel** on your own machine: `cloudflared tunnel login`, `cloudflared tunnel create quarter-hosted`, then `cloudflared tunnel route dns quarter-hosted '*.quarterfi.com'`. That prints the tunnel id and writes `~/.cloudflared/<id>.json`, the tunnel's secret. If `route dns` refuses the wildcard, add a proxied `CNAME` for `*` to `<id>.cfargotunnel.com` in the Cloudflare dashboard. Records that already exist, such as the website's, still win over the wildcard.
-4. **Write `deploy/hosted/tenants.json`** from `tenants.example.json`: the tunnel id, `"ipv6_only": true` on the e2-micro (false on a box with IPv4), and the tenants. Each has a `name` (a lowercase DNS label), the image `tag`, and optionally `"sandbox": true` and `"memory": "128m"`.
+4. **Write `deploy/hosted/tenants.json`** from `tenants.example.json`: the tunnel id, `"ipv6_only": true` on the e2-micro (false on a box with IPv4), and the tenants. Each has a `name` (a lowercase DNS label), the image `tag`, and optionally `"sandbox": true`, `"memory": "128m"` and `"plan": "paid"`. Free-plan tenants (the default) get `QUARTER_FREE_DECISIONS=10000` a month (D185); past it replies carry `x-quarter-free-limit: exceeded` and calls are still decided (D190).
 5. **Build the image and the files** on your machine. github.com and ghcr.io have no IPv6, so the IPv6-only VM cannot build the image (the Dockerfile mounts uv from ghcr.io):
 
    ```bash
@@ -124,6 +128,8 @@ The free e2-micro, from nothing. Steps marked **by hand** only the founder can d
 Add it to `tenants.json`, render, `rsync` the output, write its `env/<tenant>.env`, then `docker compose up -d`. Compose starts the new tenant and recreates Caddy and Litestream, whose networks and volumes changed, so every tenant drops off for a second or two. Other tenants keep running.
 
 ## Update the image
+
+On the Oracle box: `deploy/hosted/update-image.sh [tenant ...]` builds the arm64 image at the current commit, loads it on the box, moves the named tenants (or all) to it, renders, starts them and checks each `/healthz` from outside. Move one tenant first, then the rest. By hand, as below:
 
 Build and load the new tag as in step 5, change `tag` for the tenants to move, render, `rsync`, then `docker compose up -d`. Each tenant whose tag changed is recreated; its data stays in its volume. Move one tenant first, then the rest.
 

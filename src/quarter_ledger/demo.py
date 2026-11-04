@@ -162,7 +162,7 @@ def run(args) -> None:
                             "globex", "deep-report", max_tokens=32000)
         if status != 403 or "approval_id" not in held:
             sys.exit(f"demo: expected the large call to wait for a person, got {status} {held}")
-        print(f"\nA large call (up to 32,000 tokens of output) waits for a person: {status} {held['error']}")
+        print(f"\nA large call (up to 32,000 tokens of output) waits for a person: {status} {held['error']['code']}")
         print(f"  {held['reason']}")
         quarter_ledger(folder, env, "approve", held["approval_id"], "--as", APPROVER)
         print(f"  approved by {APPROVER}: quarter-ledger approve {held['approval_id']} --as {APPROVER}")

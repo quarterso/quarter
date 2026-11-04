@@ -192,8 +192,11 @@ def test_bills_over_http(tmp_path):
         assert status == 200 and json.loads(body)[0]["id"] == b["id"]
         assert call(url + f"/bills/{b['id']}/pay", {"method": "manual", "ref": "r"}, admin)[0] == 403
         finance = {"x-quarter-key": "finance-key"}
+        for bad in ({"method": "cash"}, {"method": "manual"}, {"payment_method": "carrier pigeon"}):
+            assert call(url + f"/bills/{b['id']}/pay", bad, finance)[0] == 400, bad
         status, body = call(url + f"/bills/{b['id']}/pay", {"method": "manual", "ref": "r"}, finance)
         assert status == 200 and json.loads(body)["status"] == "paid"
+        assert call(url + f"/bills/{b['id']}/pay", {"method": "manual", "ref": "r"}, finance)[0] == 409
         assert call(url + "/bills", None, HEADERS)[0] == 401
     finally:
         server.shutdown()

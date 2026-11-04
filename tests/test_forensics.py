@@ -273,7 +273,7 @@ def test_a_repeated_tool_call_pauses_only_its_task(gw):
             assert send(port, "loop", looping(turns), usage(0, 2000))[0] == 200
         assert send(port, "other", body(turns), usage(0, 2000))[0] == 200
     status, reply = send(port, "loop", looping(8), usage(0, 2000))
-    assert status == 423 and json.loads(reply)["error"] == "task_paused"
+    assert status == 423 and json.loads(reply)["error"]["code"] == "task_paused"
     assert "same tool call 8 times in 5 minutes, with the same result" in json.loads(reply)["reason"]
     assert send(port, "other", body(8), usage(0, 2000))[0] == 200  # the agent still works
     assert ledger.paused("a1") is None and ledger.task_paused("loop")
