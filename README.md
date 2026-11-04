@@ -6,7 +6,7 @@ Spending caps, human approvals and a tamper-evident ledger for what AI agents sp
 
 - From source: `git clone https://github.com/quarterso/quarter && cd quarter && uv sync`
 - From PyPI: `pip install quarter-ledger` (the `quarter-ledger` command; the demo below needs the source)
-- As a container: `docker run -p 8780:8780 -v quarter:/data ghcr.io/quarterso/quarter`
+- As a container: run `quarter-ledger init` once for a `.env` with fresh keys, then `docker run -p 8780:8780 --env-file .env -v quarter:/data ghcr.io/quarterso/quarter`. Without agent keys the gateway refuses to listen beyond localhost.
 
 ## Try it in two minutes
 
