@@ -1,0 +1,19 @@
+# On a version tag in the public repo, build the package and upload it to PyPI.
+# No token: PyPI trusts this workflow (Trusted Publishing, set up once on pypi.org).
+name: pypi
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  pypi:
+    if: github.repository == 'quarterso/quarter'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv build
+      - run: uv publish --trusted-publishing always
