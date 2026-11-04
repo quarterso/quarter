@@ -229,7 +229,7 @@ def test_render_escapes_centre_and_agent_names(tmp_path):
 
 
 def test_finance_sees_margin_from_stripe_read_at_most_every_ten_minutes(books, monkeypatch):
-    url, ledger, _ = books
+    _, ledger, _ = books
     reads = []
 
     def fake(key, month):

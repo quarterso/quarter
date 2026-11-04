@@ -93,6 +93,7 @@ from .feed import payee_flags
 from .insights import forecast
 from .margin import margins, stripe_revenue
 from .money import MAX_AMOUNT, to_micros, usd_display
+from .outcomes import KIND_MAX
 from .payments import AUTH_TTL, RAILS, authorisation, payee_rule, x402_settlement
 from .policy import Cap, Decision, Shadow, cap_label
 from .pricing import Price, PriceBook, UnknownPrice
@@ -132,7 +133,7 @@ HOP_BY_HOP = {
 RESERVED = {  # first path segments the gateway answers itself, never a vendor's
     "dashboard", "approvals", "healthz", "costs", "audit",
     "forecast", "agents", "authorize", "settle", "slack", "tasks", "export", "audit-pack", "attribution",
-    "standing", "bills", "issuing", "openapi.json",
+    "standing", "bills", "issuing", "openapi.json", "outcomes",
 }
 # Vendor endpoints that cost nothing: forwarded without a price, a hold or a charge.
 FREE_POSTS = ("v1/messages/count_tokens", "v1/responses/input_tokens")
@@ -922,6 +923,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._card_event(raw)
         if parts == ["costs"]:
             return self._record(raw)
+        if parts == ["outcomes"]:
+            return self._outcome(raw)
         if parts[0] == "standing":
             return self._standing(parts, raw)
         if parts == ["attribution"]:
@@ -1186,6 +1189,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"id": cost_id})
         except (json.JSONDecodeError, KeyError, TypeError, ValueError, ArithmeticError) as e:
             return self._json(400, {"error": f"bad request: {e}"})
+
+    def _outcome(self, raw: bytes):
+        """An agent reports what its task produced (outcomes.py). The task, customer and
+        agent come from the body or the usual x-quarter-* headers; a named key speaks only
+        for its own agent."""
+        if not self._agent_ok():
+            return self._json(401, {"error": "agent key required"})
+        ids = self._ids()
+        if ids is None:
+            return None
+        try:
+            body = json.loads(raw)
+            kind = str(body["kind"]).strip()[:KIND_MAX]
+            task = body.get("task") or ids["task"]
+            value = to_micros(body["value_usd"]) if body.get("value_usd") is not None else None
+            ref = str(body["id"]) if body.get("id") is not None else None
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, ArithmeticError) as e:
+            return self._json(400, {"error": f"bad request: {e}"})
+        if not kind or not task:
+            return self._json(400, {"error": "need a kind, and a task (in the body or x-quarter-task)"})
+        outcome_id, new = self.gw.ledger.add_outcome(
+            kind, str(task), ref=ref, agent=ids["agent"], customer=body.get("customer") or ids["customer"],
+            value=value, reported_by=ids["agent"])
+        return self._json(201 if new else 200, {"id": outcome_id, "recorded": new})
 
     def _standing(self, parts, raw: bytes):
         """Add a standing approval (POST /standing) or revoke one (POST /standing/{id}/revoke)."""

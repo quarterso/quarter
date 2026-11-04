@@ -122,6 +122,7 @@ from .feed import Feed, sign_feed
 from .insights import forecast
 from .margin import STRIPE_KEY_ENV, margins, read_revenue, stripe_revenue
 from .money import to_micros, usd_display, usd_shown
+from .outcomes import cost_per_outcome, read_outcomes
 from .policy import load_caps
 from .pricing import PriceBook, with_built_in
 from .proxy import MAX_WAIT, UPSTREAMS, VENDOR_KEY_ENV, Gateway, serve, show_decision_in_slack
@@ -1043,6 +1044,41 @@ def run_margin(args, ledger):
         print(f"  {usd(out['unassigned_cost'])} of AI spend named no customer (operating expense, not in margin)")
 
 
+def run_outcomes(args, ledger):
+    if args.add:
+        try:
+            found = read_outcomes(Path(args.add).read_text())
+        except (OSError, ValueError) as e:
+            sys.exit(f"outcomes: {args.add}: {e}")
+        added = sum(ledger.add_outcome(o["kind"], o["task"], at=o["at"], ref=o["ref"], agent=o["agent"],
+                                       customer=o["customer"], value=o["value"], reported_by="import")[1]
+                    for o in found)
+        print(f"{added} outcome(s) recorded, {len(found) - added} already there")
+    out = cost_per_outcome(ledger, args.month)
+
+    def usd(micros):
+        return "" if micros is None else "$" + usd_display(micros)
+
+    if args.csv:
+        writer = csv.writer(sys.stdout)
+        writer.writerow(["kind", "outcomes", "ai_cost_usd", "cost_per_outcome_usd", "value_usd", "value_per_ai_dollar"])
+        for r in out["rows"]:
+            writer.writerow([r["kind"], r["count"], usd(r["cost"]).lstrip("$"), usd(r["per_outcome"]).lstrip("$"),
+                             usd(r["value"]).lstrip("$") if r["valued"] else "",
+                             "" if r["value_per_dollar"] is None else f"{r['value_per_dollar']:.2f}"])
+        return
+    print(f"{out['month']}: {out['outcomes']} outcome(s), AI cost {usd(out['cost'])}")
+    for r in out["rows"]:
+        line = f"  {r['kind']:<24} {r['count']:>6}  AI {usd(r['cost']):>11}  per outcome {usd(r['per_outcome']) or 'n/a':>10}"
+        if r["value_per_dollar"] is not None:
+            line += f"  returns {r['value_per_dollar']:.1f}x"
+        if r["unpriced"]:
+            line += f"  ({r['unpriced']} with no spend on their task)"
+        print(line)
+    if out["idle_tasks"]:
+        print(f"  {out['idle_tasks']} task(s) spent {usd(out['idle_cost'])} and reported no outcome")
+
+
 def run_reconcile(args, ledger):
     where = args.file or f"the {args.vendor} cost API"
     try:
@@ -1477,6 +1513,12 @@ def parser() -> argparse.ArgumentParser:
     cp.add_argument("--expense-account", default="AI vendor costs")
     cp.add_argument("--revenue-cost-account", default="Cost of revenue: AI")
     cp.add_argument("--date-format", help="strftime format for the journal date")
+
+    oc = command("outcomes", run_outcomes, "cost per outcome: what agents' work produced, against its AI cost")
+    month(oc)
+    oc.add_argument("--add", metavar="CSV", help="record outcomes first from a CSV: kind, task and optionally"
+                    " at, id, customer, agent, value_usd")
+    oc.add_argument("--csv", action="store_true")
 
     mg = command("margin", run_margin, "margin after AI cost, by customer")
     month(mg)

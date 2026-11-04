@@ -9,6 +9,7 @@ from .forensics import top_tasks
 from .insights import forecast
 from .learn import suggestions
 from .money import to_cents, usd_shown
+from .outcomes import cost_per_outcome
 from .policy import Cap, cap_label, window_start
 from .register import listing
 from .store import Ledger, agent_summary, month_range
@@ -262,6 +263,25 @@ def _free_limit(ledger: Ledger, now: datetime) -> str:
             " free. Calls are still decided; each reply carries <code>x-quarter-free-limit: exceeded</code>.</p>")
 
 
+def _outcomes(o: dict) -> str:
+    """Cost per outcome for the month, shown once any outcome has been reported."""
+    if not o["outcomes"]:
+        return ""
+
+    def row(r: dict) -> str:
+        per = "" if r["per_outcome"] is None else usd(r["per_outcome"])
+        ratio = "" if r["value_per_dollar"] is None else f"{r['value_per_dollar']:.1f}x"
+        return (f"<tr><td>{escape(r['kind'])}</td><td class=n>{r['count']}</td><td class=n>{usd(r['cost'])}</td>"
+                f"<td class=n>{per}</td><td class=n>{ratio}</td></tr>")
+
+    rows = "".join(row(r) for r in o["rows"])
+    idle = (f"<p class=sub>{o['idle_tasks']} task(s) spent {usd(o['idle_cost'])} and reported no outcome.</p>"
+            if o["idle_tasks"] else "")
+    table = (f"<table><tr><th>Outcome</th><th class=n>Count</th><th class=n>AI cost</th>"
+             f"<th class=n>Per outcome</th><th class=n>Value per AI $</th></tr>{rows}</table>" if rows else "")
+    return f"<h2>Cost per outcome</h2>{table}{idle}"
+
+
 def _margin(m: dict | str | None) -> str:
     """Revenue from Stripe against AI cost, per customer, worst margin first."""
     if m is None:
@@ -398,6 +418,7 @@ def render(ledger: Ledger, caps: list[Cap], signed_in: str = "", can_decide: boo
 <h2>Cost per agent</h2>{_agents(summary)}
 {_register(ledger, keys, now)}
 {_tasks(top_tasks(ledger, start, until=end))}
+{_outcomes(cost_per_outcome(ledger, month))}
 {_margin(margin)}
 {_table("By customer", by_customer)}
 {_table("By agent", by_agent)}

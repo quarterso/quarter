@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Quarter",
-    "version": "0.1.9",
+    "version": "0.1.10",
     "summary": "The gateway and ledger that decide and record what AI agents spend.",
     "description": "Quarter's own HTTP API, as served by `quarter-ledger serve` (proxy.py).\n\nAgents call vendors through `/{vendor}/{path}` and ask before paying on any rail with `POST /authorize`, then report with `POST /settle`. People read reports and decide approvals with their own key and role (viewer, approver, finance, admin; each may do all that the ones before it may). Amounts in responses are micro-dollars unless a field says `_usd`.\n\nErrors are JSON error objects carrying a message; their exact shape is not part of this description. Every response may carry the x-quarter-* headers listed under components.headers where they apply.\n\nOn every route: a body sent with `transfer-encoding` instead of `content-length` is answered 411; a bad length 400; a body over 8 MiB 413; a body over 64 KiB from a caller with no valid key 401. Ten wrong person keys from one address in five minutes lock it out (429) for the rest of that window.\n\nUnder a Quarter route's first segment, a method the route does not answer gets 405 with an `Allow` header (components/responses/E405), and a path that is no route gets 404; neither reaches a vendor.",
     "license": {
@@ -1839,6 +1839,146 @@
           },
           "429": {
             "$ref": "#/components/responses/E429"
+          }
+        }
+      }
+    },
+    "/outcomes": {
+      "post": {
+        "tags": [
+          "Finance"
+        ],
+        "summary": "Report what an agent's task produced",
+        "description": "An outcome (a ticket resolved, an invoice closed, a lead qualified) set against the AI cost of the task that produced it, for cost per outcome. The task's cost is split evenly across its outcomes. Send your own `id` so a retry is not counted twice.",
+        "security": [
+          {
+            "agentKey": []
+          },
+          {
+            "agentBearer": []
+          },
+          {
+            "agentApiKey": []
+          },
+          {}
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/agent"
+          },
+          {
+            "$ref": "#/components/parameters/task"
+          },
+          {
+            "$ref": "#/components/parameters/customer"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "description": "What was produced, such as ticket_resolved. Up to 80 characters."
+                  },
+                  "task": {
+                    "type": "string",
+                    "description": "The task whose spend this outcome is set against; else x-quarter-task."
+                  },
+                  "customer": {
+                    "type": "string",
+                    "description": "Else x-quarter-customer."
+                  },
+                  "value_usd": {
+                    "type": [
+                      "string",
+                      "number"
+                    ],
+                    "description": "What the outcome is worth, if known."
+                  },
+                  "id": {
+                    "type": "string",
+                    "description": "Your own id for this outcome."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "recorded": {
+                      "type": "boolean",
+                      "description": "False when an outcome with this id was already recorded."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Already recorded under this id; nothing changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "integer"
+                    },
+                    "recorded": {
+                      "type": "boolean",
+                      "description": "False when an outcome with this id was already recorded."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad JSON, no kind, or no task.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "An agent key is configured and none was sent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A named key reported for another agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

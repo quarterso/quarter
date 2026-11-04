@@ -166,6 +166,21 @@ create table if not exists sanctions_cleared (
   approval_id text,
   primary key (payee, list, uid)
 );
+-- What agents' work produced (a ticket resolved, an invoice closed), each tied to the task
+-- whose spend it is set against (outcomes.py). ref is the sender's own id: a retry is not
+-- counted twice.
+create table if not exists outcomes (
+  id integer primary key,
+  ref text unique,
+  at text not null,
+  kind text not null,
+  task text,
+  agent text, customer text,
+  value integer,
+  reported_by text
+);
+create index if not exists outcomes_at on outcomes (at);
+create index if not exists outcomes_task on outcomes (task);
 -- Decisions made each UTC month (YYYY-MM), counted only with QUARTER_FREE_DECISIONS set.
 create table if not exists decisions (
   month text primary key,
@@ -534,6 +549,21 @@ class Ledger:
                 " amount, note) values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (now(), month, int(monthly), agent, customer, category, vendor, amount, note),
             ).lastrowid
+
+    def add_outcome(self, kind: str, task: str | None, at: str | None = None, ref: str | None = None,
+                    agent: str | None = None, customer: str | None = None, value: int | None = None,
+                    reported_by: str | None = None) -> tuple[int, bool]:
+        """The outcome's id, and False when one with the same ref was already recorded."""
+        with self._write():
+            if ref is not None:
+                seen = self.db.execute("select id from outcomes where ref = ?", (ref,)).fetchone()
+                if seen:
+                    return seen[0], False
+            return self.db.execute(
+                "insert into outcomes (ref, at, kind, task, agent, customer, value, reported_by)"
+                " values (?, ?, ?, ?, ?, ?, ?, ?)",
+                (ref, at or now(), kind, task, agent, customer, value, reported_by),
+            ).lastrowid, True
 
     def end_cost(self, cost_id: int, last_month: str) -> bool:
         with self._write():
