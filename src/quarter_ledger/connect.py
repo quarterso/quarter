@@ -26,6 +26,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from . import period as periods
 from .insights import forecast
 from .money import to_micros, usd_display
 from .policy import Cap
@@ -85,6 +86,7 @@ class Pulled:
 
 def setup(ledger: Ledger) -> None:
     ledger.db.executescript(SCHEMA)
+    periods.setup(ledger)
 
 
 def call_id(source: str, source_id: str) -> str:
@@ -133,11 +135,15 @@ def book(ledger: Ledger, source: str, records: Iterable[Observed], pulled: Pulle
 
 
 def _charge(ledger: Ledger, cid: str, r: Observed, amount: int) -> None:
-    """A charge dated when the spend happened, in the chain like every entry."""
-    row = (cid, "charge", r.at, r.agent, r.task, r.customer, r.vendor, r.model, amount)
+    """A charge dated when the spend happened, in the chain like every entry. Spend in a
+    locked month is booked in the first open month after it, as a restatement (period.py)."""
+    at = periods.booking_time(ledger, r.at)
+    row = (cid, "charge", at, r.agent, r.task, r.customer, r.vendor, r.model, amount)
     ledger.db.execute(
         "insert into entries (call_id, kind, at, agent, task, customer, vendor, model, amount, hash)"
         " values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (*row, ledger._next_hash("entries", row)))
+    if at != r.at:
+        periods.note_restated(ledger, cid, r.at, at, amount)
 
 
 def _call_row(ledger: Ledger, cid: str, r: Observed) -> None:
@@ -165,16 +171,24 @@ def remainder(
     key (None for no part). For each day and model, what the ledger already holds for that
     vendor from the gateway and every other source is taken off the total, and the rest is
     split over the parts in their own proportions. owner names the agent a part belongs to."""
+    setup(ledger)
     out = []
     for (day, model), parts in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1])):
         start = datetime.fromisoformat(day).replace(tzinfo=UTC)
+        span = (vendor, start.isoformat(), (start + timedelta(days=1)).isoformat(),
+                len(call_id(source, "")), call_id(source, ""))
         held = sum(
             amount for m, amount in ledger.db.execute(
                 "select coalesce(model, ''), sum(amount) from entries where kind = 'charge'"
                 " and lower(vendor) = lower(?) and at >= ? and at < ? and substr(call_id, 1, ?) != ?"
-                " group by model",
-                (vendor, start.isoformat(), (start + timedelta(days=1)).isoformat(),
-                 len(call_id(source, "")), call_id(source, "")),
+                " group by model", span,
+            ) if same_model(m) == same_model(model)
+        ) + sum(  # spend for that day booked in a later month, because the day's month was locked
+            amount for m, amount in ledger.db.execute(
+                "select coalesce(e.model, ''), sum(r.amount) from restatements r join"
+                " (select distinct call_id, vendor, model from entries) e on e.call_id = r.call_id"
+                " where lower(e.vendor) = lower(?) and r.spent_at >= ? and r.spent_at < ?"
+                " and substr(r.call_id, 1, ?) != ? group by e.model", span,
             ) if same_model(m) == same_model(model)
         )
         total = sum(parts.values())

@@ -16,6 +16,8 @@ openrouter-gen: GET /api/v1/generation?id=gen-... for the ids in a CSV your app 
 cloudflare: GET /client/v4/accounts/{account}/ai-gateway/gateways/{gateway}/logs (page,
   per_page up to 50, start_date and end_date) with an API token. Each log is one call;
   agent and customer come from its metadata (the cf-aig-metadata header).
+cloud: the AI lines of an AWS, Azure or Google Cloud cost export, or any FOCUS file, read from
+  a file or the folder the export writes to (cloud.py). Vendor totals per day and SKU.
 csv: any CSV with a date and an amount, columns named in the map.
 """
 
@@ -31,14 +33,14 @@ from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 
-from . import connect
+from . import cloud, connect
 from .connect import Observed, Pulled, Spike, pick, stable_id, usd, utc_iso
 from .money import to_micros, usd_display
 from .reconcile import KEY_ENV, _get, fetch_days
 from .slack import Slack, escape
 from .store import Ledger
 
-SOURCES = ("openai", "anthropic", "litellm", "openrouter", "openrouter-gen", "cloudflare", "csv")
+SOURCES = ("openai", "anthropic", "litellm", "openrouter", "openrouter-gen", "cloudflare", "cloud", "csv")
 TOTALS = {"openai", "anthropic", "openrouter"}  # vendor totals: book the remainder
 MAX_PAGES = 1000
 LITELLM_PAGE = 1000
@@ -362,6 +364,11 @@ def pull(ledger: Ledger, source: str, start: datetime, end: datetime, env, mappi
                                  need(env, "QUARTER_CLOUDFLARE_ACCOUNT", "your Cloudflare account id"),
                                  need(env, "QUARTER_CLOUDFLARE_GATEWAY", "the AI Gateway's id"),
                                  start, end, mapping)
+    elif source == "cloud":
+        if not file:
+            raise ValueError("cloud needs --file: an export file or the folder the export writes to")
+        records, _ = cloud.read(cloud.files(Path(file)))
+        pages = iter([([r for r in records if not explicit or _inside(r, start, end)], None)])
     elif source == "csv":
         if not file:
             raise ValueError("csv needs --file")
@@ -417,7 +424,7 @@ def add_arguments(p) -> None:
     when.add_argument("--month", help="YYYY-MM")
     when.add_argument("--since", help="YYYY-MM-DD or an ISO time; default where the last pull stopped")
     p.add_argument("--until", help="YYYY-MM-DD or an ISO time; default now")
-    p.add_argument("--file", help="litellm: a CSV or JSON export of spend logs; openrouter-gen: the ids;"
+    p.add_argument("--file", help="litellm: a CSV or JSON export of spend logs; openrouter-gen: the ids; cloud: an export file or its folder;"
                    " csv: the file")
     p.add_argument("--map", help="JSON text or a path: which fields name the agent, customer and task,"
                    " and which projects, workspaces or keys are which agent")

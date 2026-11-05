@@ -93,11 +93,13 @@ from . import (
     cards,
     controls,
     demo,
+    flux,
     forensics,
     incident,
     learn,
     mandate,
     mcp,
+    period,
     sanctions,
     sources,
     status,
@@ -1033,6 +1035,15 @@ def run_board(args, ledger):
         sys.exit(f"board: {e}")
 
 
+def run_flux(args, ledger):
+    try:
+        book = PriceBook.load(with_built_in(env_config("QUARTER_PRICES")))
+        out = flux.report(ledger, args.month, book, (to_micros(args.over_usd), args.over_pct))
+    except ValueError as e:
+        sys.exit(f"flux: {e}")
+    print(json.dumps(out, indent=1) if args.json else flux.markdown(out), end="\n" if args.json else "")
+
+
 def run_margin(args, ledger):
     revenue, notes = load_revenue(args, "margin")
     out = margins(ledger, args.month, revenue)
@@ -1452,6 +1463,31 @@ def show_transfer(t: dict) -> str:
             f"  tx {t['tx']}")
 
 
+def run_period(args, ledger):
+    try:
+        if args.period_command == "lock":
+            book = PriceBook.load(with_built_in(env_config("QUARTER_PRICES")))
+            folder = period.lock(ledger, args.month, args.by, Path(args.out), book, package_version())
+            print(f"{args.month} locked. Close package: {folder}")
+        elif args.period_command == "reopen":
+            version = period.reopen(ledger, args.month, args.by, args.reason)
+            print(f"{args.month} reopened (was version {version}); locking it again writes version {version + 1}")
+        elif args.period_command == "verify":
+            problems = period.verify(ledger, Path(args.folder))
+            for p in problems:
+                print(p)
+            if problems:
+                sys.exit(1)
+            print("The package and the ledger agree.")
+        else:
+            for row in period.locks(ledger):
+                state = (f"reopened {row['reopened_at'][:10]} by {row['reopened_by']}: {row['reason']}"
+                         if row["reopened_at"] else "locked")
+                print(f"{row['month']} v{row['version']}  {row['at'][:16]} by {row['by']}  {state}")
+    except (OSError, ValueError) as e:
+        sys.exit(f"period {args.period_command}: {e}")
+
+
 def run_wallets(args, ledger):
     if args.wallets_command == "policy":
         payees = env_config("QUARTER_PAYEES", {})
@@ -1726,6 +1762,12 @@ def parser() -> argparse.ArgumentParser:
     ct.add_argument("--as-of", type=date.fromisoformat, help="the day to measure from (default: today)")
     ct.add_argument("--csv", action="store_true")
 
+    fx = command("flux", run_flux, "why AI spend moved since last month, vendor changes coming, and steady use")
+    month(fx)
+    fx.add_argument("--over-usd", default="1000", help="a change needs a note above this many dollars (default 1000)")
+    fx.add_argument("--over-pct", type=float, default=10.0, help="and above this percent (default 10)")
+    fx.add_argument("--json", action="store_true", help="JSON instead of Markdown")
+
     bd = command("board", run_board, "the month's AI spend and margin on one page, in Markdown")
     month(bd)
     source = bd.add_mutually_exclusive_group()
@@ -1883,6 +1925,19 @@ def parser() -> argparse.ArgumentParser:
     fo.add_argument("--file", help="the fallback file; default QUARTER_FAIL_OPEN_LOG or <db>.fail-open.jsonl")
     command("backup", run_backup, "copy the ledger while the gateway runs, then check the copy"
             ).add_argument("path", help="file to write; never overwritten")
+
+    psub = command("period", run_period, "lock a closed month, with its close package; reopen; verify"
+                   ).add_subparsers(dest="period_command", required=True)
+    pl = psub.add_parser("lock", help="write close-YYYY-MM-vN/ and lock the month; later revisions restate")
+    month(pl)
+    pl.add_argument("--by", required=True, help="who is locking it")
+    pl.add_argument("--out", default=".", help="folder for the close package (default here)")
+    po = psub.add_parser("reopen", help="unlock a month, with who and why")
+    month(po)
+    po.add_argument("--by", required=True)
+    po.add_argument("--reason", required=True)
+    psub.add_parser("verify", help="check a close package against the ledger").add_argument("folder")
+    psub.add_parser("list", help="every lock, and every reopening")
 
     wsub = command("wallets", run_wallets,
                    "the company's own agent wallets: reconcile on chain, export a wallet policy"

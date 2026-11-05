@@ -1,0 +1,276 @@
+{
+ "_about": "Dated vendor changes that move an AI bill without a code change. One list for the free close (website) and the ledger, copied byte for byte. A factor is the new price over what the customer pays today; a retirement prices the usual replacement. checked is the day every entry was last read at its source (memory/research/vendor-change-feed-2026-11-04.md).",
+ "checked": "2026-11-04",
+ "changes": [
+  {
+   "date": "2026-07-30",
+   "vendor": "openai",
+   "match": "priority|fast",
+   "kind": "tier",
+   "note": "OpenAI replaced Priority processing with Fast mode, billed at twice the standard price, on 30 July.",
+   "source": "https://developers.openai.com/api/docs/changelog"
+  },
+  {
+   "date": "2026-08-05",
+   "vendor": "anthropic",
+   "match": "opus-4-1(?!\\d)",
+   "kind": "retire",
+   "factor": 0.3333333333333333,
+   "note": "Claude Opus 4.1 retired on 5 August. Opus 4.8 lists at $5 and $25 per million, against $15 and $75.",
+   "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+  },
+  {
+   "date": "2026-08-21",
+   "vendor": "openai",
+   "match": "gpt-5-6-sol",
+   "kind": "promo",
+   "factor": {
+    "input": 0.8,
+    "output": 0.667
+   },
+   "note": "OpenAI cut GPT-5.6 Sol to $4 and $20 per million on 21 August as a promotion.",
+   "source": "https://developers.openai.com/api/docs/changelog"
+  },
+  {
+   "date": "2026-09-01",
+   "vendor": "anthropic",
+   "match": "(fable-5-1|mythos-5-1).*cache-?read|cache-?read.*(fable-5-1|mythos-5-1)",
+   "kind": "cache",
+   "factor": 0.25,
+   "note": "Claude Fable 5.1 and Mythos 5.1 launched on 1 September with cache reads at $0.25 per million, 0.025 times input, against $1 on Fable 5.",
+   "source": "https://platform.claude.com/docs/en/release-notes/overview"
+  },
+  {
+   "date": "2026-09-24",
+   "vendor": "anthropic",
+   "match": "claude",
+   "kind": "billing",
+   "note": "Anthropic resumed billing three kinds of refusal on 24 September, after not billing refusals with no output since 2 June.",
+   "source": "https://platform.claude.com/docs/en/release-notes/overview"
+  },
+  {
+   "date": "2026-09-29",
+   "vendor": "openai",
+   "match": "gpt-6-1-sol.*cache|cache.*gpt-6-1-sol",
+   "kind": "cache",
+   "note": "GPT-6.1 Sol launched on 29 September with cached input at $0.10 per million, half of GPT-6 Sol, and cache writes at $2.50 against $2 input.",
+   "source": "https://developers.openai.com/api/docs/pricing",
+   "factor": 0.5
+  },
+  {
+   "date": "2026-10-07",
+   "vendor": "anthropic",
+   "match": "sonnet-5-5.*cache-?read|cache-?read.*sonnet-5-5",
+   "kind": "cache",
+   "factor": 0.5,
+   "note": "Anthropic halved Sonnet 5.5 cache reads, from $0.20 to $0.10 per million tokens, on 7 October.",
+   "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+  },
+  {
+   "date": "2026-10-07",
+   "vendor": "aws",
+   "match": "sonnet-5-5.*cache-?read|cache-?read.*sonnet-5-5",
+   "kind": "cache",
+   "factor": 0.5,
+   "note": "Bedrock halved Claude Sonnet 5.5 cache reads on 7 October.",
+   "source": "https://aws.amazon.com/bedrock/pricing/"
+  },
+  {
+   "date": "2026-10-08",
+   "vendor": "aws",
+   "match": "opus-4-1(?!\\d)",
+   "kind": "tier",
+   "note": "Claude Opus 4.1 on Bedrock entered extended access on 8 October at a higher price set by Anthropic; it ends on 8 January.",
+   "source": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-lifecycle-legacy.html"
+  },
+  {
+   "date": "2026-10-08",
+   "vendor": "gemini",
+   "match": "gemini-3-5-flash(?!-lite)",
+   "kind": "reroute",
+   "note": "Since 8 October Google sends gemini-3.5-flash calls to Gemini 3.6 Flash and bills them at its rates.",
+   "source": "https://aistudio.google.com/docs/changelog"
+  },
+  {
+   "date": "2026-10-20",
+   "vendor": "openai",
+   "match": "cache",
+   "kind": "cache",
+   "note": "OpenAI added a 12-hour prompt cache on 20 October, with writes at 2.5 times the input price.",
+   "source": "https://developers.openai.com/api/docs/changelog"
+  },
+  {
+   "date": "2026-11-15",
+   "vendor": "azure",
+   "match": "haiku-4-5",
+   "kind": "retire",
+   "note": "Microsoft Foundry retires Claude Haiku 4.5 on 15 November, with no replacement named.",
+   "source": "https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule"
+  },
+  {
+   "date": "2026-11-19",
+   "vendor": "azure",
+   "match": "(^|[^a-z0-9])(o1|o3|o4-mini)(?![a-z0-9])",
+   "kind": "reroute",
+   "note": "Azure retires o1, o3, o3-mini and o4-mini on 19 November and moves Standard deployments to GPT-5.6 Sol or Terra.",
+   "source": "https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule"
+  },
+  {
+   "date": "2026-11-30",
+   "vendor": "anthropic",
+   "match": "opus-4-8.*fast|fast.*opus-4-8",
+   "kind": "tier",
+   "note": "Fast mode on Claude Opus 4.8 ends on 30 November and calls with it fail after. Opus 5.5 fast is $8 and $40 per million, against $10 and $50.",
+   "source": "https://platform.claude.com/docs/en/release-notes/overview",
+   "factor": 0.8
+  },
+  {
+   "date": "2026-11-30",
+   "vendor": "anthropic",
+   "match": "sonnet-4-5(?!\\d)",
+   "kind": "retire",
+   "factor": 0.6666666666666666,
+   "note": "Claude Sonnet 4.5 retires on 30 November, and calls to it fail after. Sonnet 5.5 lists at $2 and $10 per million, against $3 and $15.",
+   "source": "https://platform.claude.com/docs/en/about-claude/model-deprecations"
+  },
+  {
+   "date": "2026-11-30",
+   "vendor": "openai",
+   "match": "gpt-5-6-sol",
+   "kind": "promo",
+   "note": "GPT-5.6 Sol promotional pricing of $4 and $20 per million runs until 30 November; the price after it is not yet published.",
+   "source": "https://developers.openai.com/api/docs/pricing"
+  },
+  {
+   "date": "2026-12-01",
+   "vendor": "gemini",
+   "match": "gemini-2-5-flash(?!-lite)",
+   "kind": "reroute",
+   "factor": {
+    "input": 1,
+    "output": 1
+   },
+   "note": "From 1 December Google sends gemini-2.5-flash calls to Gemini 3.5 Flash-Lite at its rates: text prices are the same, audio input falls 70%.",
+   "source": "https://aistudio.google.com/docs/changelog"
+  },
+  {
+   "date": "2026-12-01",
+   "vendor": "gemini",
+   "match": "gemini-2-5-pro",
+   "kind": "reroute",
+   "factor": {
+    "input": 0.6,
+    "output": 0.375
+   },
+   "note": "From 1 December Google sends gemini-2.5-pro calls to Gemini 3.8 Flash and bills them at its rates: input 40% lower and output 62.5% lower in December.",
+   "source": "https://aistudio.google.com/docs/changelog"
+  },
+  {
+   "date": "2026-12-01",
+   "vendor": "gemini",
+   "match": "gemini-4-argon",
+   "kind": "price",
+   "factor": 2,
+   "note": "Gemini 4 Argon doubles in price on 1 December.",
+   "source": "https://aistudio.google.com/docs/pricing"
+  },
+  {
+   "date": "2026-12-11",
+   "vendor": "openai",
+   "match": "(^|[^a-z0-9])o3(?![0-9]|-mini|-pro)",
+   "kind": "retire",
+   "factor": {
+    "input": 2,
+    "output": 2.5
+   },
+   "note": "OpenAI shuts down o3 on 11 December. GPT-5.6 Sol lists at $4 and $20 per million, against $2 and $8.",
+   "source": "https://developers.openai.com/api/docs/deprecations"
+  },
+  {
+   "date": "2026-12-11",
+   "vendor": "openai",
+   "match": "gpt-5(?!-[1-9](?:-|$|[a-z]))(?!-mini|-nano)(?![0-9])",
+   "kind": "retire",
+   "factor": {
+    "input": 3.2,
+    "output": 2
+   },
+   "note": "OpenAI shuts down gpt-5 on 11 December. GPT-5.6 Sol lists at $4 and $20 per million, against $1.25 and $10.",
+   "source": "https://developers.openai.com/api/docs/deprecations"
+  },
+  {
+   "date": "2026-12-11",
+   "vendor": "openai",
+   "match": "gpt-5-mini",
+   "kind": "retire",
+   "factor": {
+    "input": 8,
+    "output": 6
+   },
+   "note": "OpenAI shuts down gpt-5-mini on 11 December. GPT-5.6 Terra lists at $2 and $12 per million, against $0.25 and $2.",
+   "source": "https://developers.openai.com/api/docs/deprecations"
+  },
+  {
+   "date": "2026-12-11",
+   "vendor": "openai",
+   "match": "gpt-5-nano",
+   "kind": "retire",
+   "factor": {
+    "input": 4,
+    "output": 3
+   },
+   "note": "OpenAI shuts down gpt-5-nano on 11 December. GPT-5.6 Luna lists at $0.20 and $1.20 per million, against $0.05 and $0.40.",
+   "source": "https://developers.openai.com/api/docs/deprecations"
+  },
+  {
+   "date": "2027-01-01",
+   "vendor": "gemini",
+   "match": "gemini-2-5-pro",
+   "kind": "price",
+   "factor": {
+    "input": 1.2,
+    "output": 0.75
+   },
+   "note": "Rerouted gemini-2.5-pro calls follow Gemini 3.8 Flash, which doubles on 1 January: against gemini-2.5-pro, input 20% higher and output 25% lower.",
+   "source": "https://aistudio.google.com/docs/pricing"
+  },
+  {
+   "date": "2027-01-01",
+   "vendor": "gemini",
+   "match": "gemini-3-6-flash",
+   "kind": "price",
+   "factor": 2,
+   "note": "Gemini 3.6 Flash doubles in price on 1 January.",
+   "source": "https://aistudio.google.com/docs/pricing"
+  },
+  {
+   "date": "2027-01-01",
+   "vendor": "gemini",
+   "match": "gemini-3-8-flash",
+   "kind": "price",
+   "factor": 2,
+   "note": "Gemini 3.8 Flash doubles in price on 1 January.",
+   "source": "https://aistudio.google.com/docs/pricing"
+  },
+  {
+   "date": "2027-01-14",
+   "vendor": "azure",
+   "match": "gpt-4o-2024-05-13",
+   "kind": "reroute",
+   "note": "Azure moves Standard gpt-4o 2024-05-13 deployments to gpt-5.1 on 14 January and bills them at its rates.",
+   "source": "https://learn.microsoft.com/en-us/azure/foundry/openai/concepts/model-retirement-schedule"
+  },
+  {
+   "date": "2027-01-14",
+   "vendor": "openai",
+   "match": "gpt-4o(?!-mini)|gpt-4-1(?![0-9]|-mini|-nano)",
+   "kind": "retire",
+   "factor": {
+    "input": 0.04,
+    "output": 0.05
+   },
+   "note": "OpenAI shuts down GPT-4o and GPT-4.1 on 14 January. GPT-6 Luna lists at $0.10 and $0.50 per million, against $2.50 and $10 for GPT-4o.",
+   "source": "https://developers.openai.com/api/docs/deprecations"
+  }
+ ]
+}
